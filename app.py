@@ -10,9 +10,15 @@ app = Flask(__name__)
 def parse_pdf(file):
 
     mixers = {}
+    text = ""
 
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
+
+            # TEXT (fck için)
+            t = page.extract_text()
+            if t:
+                text += t
 
             table = page.extract_table()
             if not table:
@@ -20,52 +26,43 @@ def parse_pdf(file):
 
             for row in table:
 
-                # yeterli kolon yoksa geç
-                if not row or len(row) < 10:
+                if not row or len(row) < 5:
                     continue
 
                 try:
                     mixer_raw = str(row[1]).strip()
 
-                    # 🔥 SADECE SAYI OLAN MİKSER
+                    # SADECE SAYI OLAN MİKSER
                     if not mixer_raw.isdigit():
                         continue
 
                     mixer = mixer_raw
 
-                    # 🔥 28 GÜNLÜK NUMUNE SÜTUNU (SONDAN 2.)
+                    # 28 GÜNLÜK DEĞER (SONDAN 2. SÜTUN)
                     val_raw = str(row[-2]).replace(",", ".").strip()
 
-                    # boşsa (7 günlük satır)
+                    # boşsa (7 gün)
                     if val_raw == "" or val_raw.lower() == "none":
                         continue
 
                     value = float(val_raw)
 
-                    # filtre (mantıklı beton aralığı)
+                    # filtre
                     if 20 < value < 80:
                         mixers.setdefault(mixer, []).append(value)
 
                 except:
                     continue
 
-    # 🔥 SADECE 3 DEĞERİ OLAN MİKSERLER
+    # 🔥 HER MİKSERDEN SADECE 3 DEĞER AL
     clean_mixers = {}
     for m, vals in mixers.items():
-        if len(vals) == 3:
-            clean_mixers[m] = vals
+        if len(vals) >= 3:
+            clean_mixers[m] = vals[:3]
 
-    # tüm değerler
     values = [v for arr in clean_mixers.values() for v in arr]
 
-    # 🔥 FCK BUL (C35/45 → 45)
-    text = ""
-    with pdfplumber.open(file) as pdf:
-        for p in pdf.pages:
-            t = p.extract_text()
-            if t:
-                text += t
-
+    # 🔥 FCK (C25/30 → 30)
     match = re.search(r"C(\d{2})/(\d{2})", text)
     fck = int(match.group(2)) if match else 30
 
@@ -76,14 +73,14 @@ def parse_pdf(file):
 def analyze(fck, mixers, values):
 
     if not values:
-        return {"error": "Veri okunamadı"}
+        return {"error": "PDF veri okunamadı"}
 
     avg = np.mean(values)
     min_val = min(values)
 
     mixer_count = len(mixers)
 
-    # 🔥 TS KRİTERİ (MİKSER SAYISINA GÖRE)
+    # 🔥 TS KURALI (MİKSER SAYISI)
     if mixer_count == 1:
         limit = fck
     elif 2 <= mixer_count <= 4:
@@ -102,15 +99,21 @@ def analyze(fck, mixers, values):
 
         m_avg = np.mean(vals)
         diff = max(vals) - min(vals)
+        limit_diff = 0.15 * m_avg
 
-        # dağılım kontrolü
-        dist_ok = diff <= (0.15 * m_avg)
-
-        # dayanım kontrolü
+        dist_ok = diff <= limit_diff
         strength_ok = m_avg >= (fck - 4)
 
         m_status = "OK"
-        if not dist_ok or not strength_ok:
+        reason = []
+
+        if not dist_ok:
+            reason.append("Dağılım fazla")
+
+        if not strength_ok:
+            reason.append("Dayanım düşük")
+
+        if reason:
             m_status = "PROBLEM"
             bad_mixers.append(m)
 
@@ -119,7 +122,9 @@ def analyze(fck, mixers, values):
             "values": [round(v,1) for v in vals],
             "avg": round(m_avg, 2),
             "diff": round(diff, 2),
-            "status": m_status
+            "limit": round(limit_diff, 2),
+            "status": m_status,
+            "reason": ", ".join(reason) if reason else "Sorun yok"
         })
 
     return {
@@ -136,7 +141,7 @@ def analyze(fck, mixers, values):
 
 # ---------------- ARAYÜZ ----------------
 HTML = """
-<h2>BETON ANALİZ SİSTEMİ (FINAL)</h2>
+<h2>BETON ANALİZ SİSTEMİ</h2>
 
 <form method="post" enctype="multipart/form-data">
     PDF yükle:
@@ -150,21 +155,22 @@ HTML = """
         <p style="color:red">{{r.error}}</p>
     {% else %}
 
-        <h3>GENEL</h3>
+        <h3>GENEL SONUÇ</h3>
         Fck: {{r.fck}} <br>
-        Numune (28 gün): {{r.numune}} <br>
+        28 Gün Numune: {{r.numune}} <br>
         Ortalama: {{r.ortalama}} <br>
         Minimum: {{r.min}} <br>
         Limit: {{r.limit}} <br>
-        Durum: <b>{{r.status}}</b> <br>
+        <b>Durum: {{r.status}}</b> <br>
 
-        <h3>MİKSER ANALİZİ</h3>
+        <h3>MİKSER DETAY</h3>
         {% for m in r.mixers %}
-            Mikser {{m.mixer}} →
-            {{m.values}} |
-            Ort: {{m.avg}} |
-            Fark: {{m.diff}} |
-            {{m.status}} <br>
+            <b>Mikser {{m.mixer}}</b><br>
+            Değerler: {{m.values}} <br>
+            Ortalama: {{m.avg}} <br>
+            Max-Min: {{m.diff}} (Limit: {{m.limit}}) <br>
+            Durum: {{m.status}} <br>
+            Açıklama: {{m.reason}} <br><br>
         {% endfor %}
 
         <h3>Problemli Mikserler</h3>
