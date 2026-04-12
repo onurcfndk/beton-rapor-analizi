@@ -6,7 +6,23 @@ import re
 app = Flask(__name__)
 
 
-# ---------------- PDF OKU ----------------
+# ---------------- SMART COLUMN FINDER ----------------
+def find_column(rows, keyword_list):
+
+    for r in rows[:5]:  # sadece üst kısım
+
+        for i, cell in enumerate(r):
+
+            cell_str = str(cell).lower()
+
+            for kw in keyword_list:
+                if kw in cell_str:
+                    return i
+
+    return None
+
+
+# ---------------- PDF PARSE ----------------
 def parse_pdf(file):
 
     rows = []
@@ -23,55 +39,65 @@ def parse_pdf(file):
             if text:
                 full_text += " " + text
 
+    if not rows:
+        return None, [], {}
+
     # ---------------- FCK ----------------
-    match = re.search(r"C(\d{2})/(\d{2})", full_text)
+    match = re.search(r"C\s*(\d{2})\s*/\s*(\d{2})", full_text)
     fck = int(match.group(2)) if match else None
 
-    if not rows:
-        return fck, [], {}
+    # ---------------- COLUMN DETECTION ----------------
+    mixer_idx = find_column(rows, ["mikser", "mixer", "t.mikser"])
+    value_idx = find_column(rows, ["28", "28 gün", "28gun", "28-day"])
 
-    # ---------------- HEADER ----------------
-    header = rows[0]
+    if mixer_idx is None:
+        mixer_idx = 0
 
-    try:
-        mixer_idx = next(i for i, x in enumerate(header) if "mikser" in str(x).lower())
-        day28_idx = next(i for i, x in enumerate(header) if "28" in str(x))
-    except:
-        return fck, [], {}
+    if value_idx is None:
+        value_idx = -1
 
     mixers = {}
 
-    for r in rows[1:]:
+    # ---------------- ROW PARSE ----------------
+    for r in rows:
 
-        if len(r) <= max(mixer_idx, day28_idx):
+        if len(r) <= max(mixer_idx, value_idx):
             continue
 
         try:
-            mixer = str(r[mixer_idx]).strip()
-            value = float(str(r[day28_idx]).replace(",", "."))
+            mixer_raw = str(r[mixer_idx]).strip()
+            value_raw = str(r[value_idx]).replace(",", ".")
 
-            if mixer and 10 < value < 120:
+            mixer = re.findall(r"\d+", mixer_raw)
+            mixer = mixer[0] if mixer else mixer_raw
+
+            value = float(value_raw)
+
+            if 10 < value < 120:
+
                 mixers.setdefault(mixer, []).append(value)
 
         except:
             continue
 
-    all_values = [v for arr in mixers.values() for v in arr]
+    values = [v for arr in mixers.values() for v in arr]
 
-    return fck, all_values, mixers
+    return fck, values, mixers
 
 
-# ---------------- ANALİZ ----------------
+# ---------------- ANALYSIS ----------------
 def analyze(fck, values, mixers):
 
-    if not values or not fck:
-        return {"error": "Veri eksik"}
+    if not values:
+        return {"error": "Hiç veri çekilemedi (PDF format kontrol)"}
+
+    if not fck:
+        return {"error": "Fck bulunamadı"}
 
     n = len(values)
     avg = np.mean(values)
     min_val = min(values)
 
-    # ---------------- GLOBAL KONTROL ----------------
     if n == 1:
         limit = fck
     elif n <= 4:
@@ -79,50 +105,44 @@ def analyze(fck, values, mixers):
     else:
         limit = fck + 2
 
-    global_status = "UYGUN"
+    status = "UYGUN"
     if avg < limit or min_val < fck - 4:
-        global_status = "UYGUN DEĞİL"
+        status = "UYGUN DEĞİL"
 
-    # ---------------- MİKSER KONTROL ----------------
     mixer_results = []
-    bad_mixers = []
+    bad = []
 
     for m, vals in mixers.items():
 
         m_avg = np.mean(vals)
         diff = max(vals) - min(vals)
 
-        dist_ok = diff <= (0.15 * m_avg)
-        strength_ok = m_avg >= (fck - 4)
+        ok = diff <= (0.15 * m_avg) and m_avg >= (fck - 4)
 
-        status = "OK"
-        if not dist_ok or not strength_ok:
-            status = "PROBLEM"
-            bad_mixers.append(m)
+        if not ok:
+            bad.append(m)
 
         mixer_results.append({
             "mixer": m,
             "avg": round(m_avg, 2),
             "diff": round(diff, 2),
-            "status": status
+            "status": "OK" if ok else "PROBLEM"
         })
 
-    # ---------------- SONUÇ ----------------
     return {
         "fck": fck,
         "numune": n,
-        "ortalama": round(avg, 2),
+        "avg": round(avg, 2),
         "min": round(min_val, 2),
-        "global_status": global_status,
+        "status": status,
         "mixers": mixer_results,
-        "bad_mixers": bad_mixers,
+        "bad": bad,
         "worst3": sorted(values)[:3]
     }
 
 
-# ---------------- UI ----------------
 HTML = """
-<h2>BETON ANALİZ SİSTEMİ (FINAL LOGIC)</h2>
+<h2>BETON ANALİZ (SMART PARSER v2)</h2>
 
 <form method="post" enctype="multipart/form-data">
     PDF:
@@ -136,20 +156,19 @@ HTML = """
         <p style="color:red">{{r.error}}</p>
     {% else %}
 
-        <h3>GLOBAL</h3>
         Fck: {{r.fck}} <br>
         Numune: {{r.numune}} <br>
-        Ortalama: {{r.ortalama}} <br>
+        Ortalama: {{r.avg}} <br>
         Minimum: {{r.min}} <br>
-        Durum: {{r.global_status}} <br>
+        Durum: {{r.status}} <br>
 
-        <h3>MİKSERLER</h3>
+        <h4>Mikserler</h4>
         {% for m in r.mixers %}
             {{m.mixer}} → {{m.avg}} | {{m.diff}} | {{m.status}} <br>
         {% endfor %}
 
-        <h3>Problemli Mikserler</h3>
-        {{r.bad_mixers}}
+        <h4>Problemli</h4>
+        {{r.bad}}
 
     {% endif %}
 
