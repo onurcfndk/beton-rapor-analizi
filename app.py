@@ -1,154 +1,143 @@
 from flask import Flask, request, render_template_string
 import pdfplumber
 import numpy as np
-import re
 
 app = Flask(__name__)
 
+GLOBAL_STATE = {
+    "header": None,
+    "rows": None,
+    "mixer_idx": None,
+    "value_idx": None
+}
 
-# ---------------- PDF TEXT PARSER ----------------
-def parse_pdf(file):
 
-    text = ""
+# ---------------- PDF OKU ----------------
+def read_pdf(file):
+
+    rows = []
 
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            t = page.extract_text()
-            if t:
-                text += " " + t
+            table = page.extract_table()
+            if table:
+                rows.extend(table)
 
-    if not text:
-        return None, [], {}
+    if not rows:
+        return None
 
-    # ---------------- FCK ----------------
-    match = re.search(r"C\s*(\d{2})\s*/\s*(\d{2})", text)
-    fck = int(match.group(2)) if match else None
+    return rows
 
-    # ---------------- 28 GÜN DEĞERLERİ ----------------
-    # 28 gün geçen sayıları yakala (yakın pattern)
-    values = []
 
-    pattern = re.findall(r"28\s*[^0-9]{0,10}(\d{2,3}[\.,]?\d*)", text)
+# ---------------- KOLON BUL ----------------
+def detect_columns(rows):
 
-    for p in pattern:
-        try:
-            v = float(p.replace(",", "."))
-            values.append(v)
-        except:
-            pass
+    header = rows[0]
 
-    # fallback: tüm sayılar (filtreli)
-    if not values:
-        nums = re.findall(r"\d+\.\d+|\d+", text)
-        for n in nums:
-            try:
-                v = float(n)
-                if 10 < v < 120:
-                    values.append(v)
-            except:
-                pass
+    cols = {
+        "columns": header,
+        "suggest_mixer": None,
+        "suggest_value": None
+    }
 
-    # ---------------- MİKSER ----------------
-    mixers = {}
+    for i, c in enumerate(header):
 
-    mixer_matches = re.findall(r"(?:Mikser|T\.?Mikser)\s*[:\-]?\s*(\d+)", text)
+        c_str = str(c).lower()
 
-    for i, m in enumerate(mixer_matches):
+        if "mikser" in c_str or "mixer" in c_str:
+            cols["suggest_mixer"] = i
 
-        # aynı sıradaki 28 gün değerini bağla
-        if i < len(values):
-            mixers.setdefault(m, []).append(values[i])
+        if "28" in c_str:
+            cols["suggest_value"] = i
 
-    return fck, values, mixers
+    return cols
 
 
 # ---------------- ANALİZ ----------------
-def analyze(fck, values, mixers):
+def analyze(rows, mixer_idx, value_idx, fck=30):
 
-    if not values or not fck:
-        return {"error": "PDF içinden veri çıkarılamadı (format farklı olabilir)"}
+    mixers = {}
 
-    n = len(values)
-    avg = np.mean(values)
-    min_val = min(values)
+    for r in rows[1:]:
 
-    if n == 1:
-        limit = fck
-    elif n <= 4:
-        limit = fck + 1
-    else:
-        limit = fck + 2
-
-    status = "UYGUN"
-    if avg < limit or min_val < fck - 4:
-        status = "UYGUN DEĞİL"
-
-    mixer_results = []
-    bad = []
-
-    for m, vals in mixers.items():
-
-        if not vals:
+        if len(r) <= max(mixer_idx, value_idx):
             continue
 
-        m_avg = np.mean(vals)
-        diff = max(vals) - min(vals)
+        try:
+            mixer = str(r[mixer_idx]).strip()
+            value = float(str(r[value_idx]).replace(",", "."))
 
-        ok = diff <= (0.15 * m_avg) and m_avg >= (fck - 4)
+            mixers.setdefault(mixer, []).append(value)
 
-        if not ok:
-            bad.append(m)
+        except:
+            continue
 
-        mixer_results.append({
-            "mixer": m,
-            "avg": round(m_avg, 2),
-            "diff": round(diff, 2),
-            "status": "OK" if ok else "PROBLEM"
-        })
+    all_values = [v for arr in mixers.values() for v in arr]
+
+    if not all_values:
+        return {"error": "Veri yok"}
+
+    avg = np.mean(all_values)
+    min_val = min(all_values)
+
+    status = "UYGUN"
+    if avg < fck + 2 or min_val < fck - 4:
+        status = "UYGUN DEĞİL"
 
     return {
-        "fck": fck,
-        "numune": n,
-        "avg": round(avg, 2),
-        "min": round(min_val, 2),
+        "avg": round(avg,2),
+        "min": round(min_val,2),
         "status": status,
-        "mixers": mixer_results,
-        "bad": bad,
-        "worst3": sorted(values)[:3]
+        "count": len(all_values),
+        "mixers": mixers
     }
 
 
 # ---------------- UI ----------------
 HTML = """
-<h2>BETON ANALİZ (TEXT MODE FINAL)</h2>
+<h2>BETON ANALİZ - KOLON SEÇİMLİ SİSTEM</h2>
 
 <form method="post" enctype="multipart/form-data">
     PDF:
     <input type="file" name="file">
-    <button type="submit">Analiz Et</button>
+    <button type="submit">PDF Yükle</button>
 </form>
 
-{% if r %}
+{% if step == 1 %}
 
-    {% if r.error %}
-        <p style="color:red">{{r.error}}</p>
-    {% else %}
+    <h3>Kolonları Seç</h3>
 
-        Fck: {{r.fck}} <br>
-        Numune: {{r.numune}} <br>
-        Ortalama: {{r.avg}} <br>
-        Minimum: {{r.min}} <br>
-        Durum: {{r.status}} <br>
+    <form method="post">
+        <input type="hidden" name="step" value="2">
 
-        <h4>Mikserler</h4>
-        {% for m in r.mixers %}
-            Mikser {{m.mixer}} → {{m.avg}} | {{m.status}} <br>
-        {% endfor %}
+        <p>Mikser Kolonu:</p>
+        <select name="mixer">
+            {% for i,c in cols.columns %}
+                <option value="{{i}}">{{c}}</option>
+            {% endfor %}
+        </select>
 
-        <h4>Problemli</h4>
-        {{r.bad}}
+        <p>28 Gün Kolonu:</p>
+        <select name="value">
+            {% for i,c in cols.columns %}
+                <option value="{{i}}">{{c}}</option>
+            {% endfor %}
+        </select>
 
-    {% endif %}
+        <button type="submit">Kaydet & Analiz Et</button>
+    </form>
+
+{% endif %}
+
+
+{% if step == 2 %}
+
+    <h3>SONUÇ</h3>
+
+    Ortalama: {{r.avg}} <br>
+    Minimum: {{r.min}} <br>
+    Durum: {{r.status}} <br>
+    Numune: {{r.count}} <br>
 
 {% endif %}
 """
@@ -156,14 +145,39 @@ HTML = """
 
 @app.route("/", methods=["GET", "POST"])
 def home():
-    result = None
 
     if request.method == "POST":
-        file = request.files.get("file")
-        fck, values, mixers = parse_pdf(file)
-        result = analyze(fck, values, mixers)
 
-    return render_template_string(HTML, r=result)
+        step = request.form.get("step")
+
+        # 1. PDF yükleme
+        if not step:
+
+            file = request.files.get("file")
+            rows = read_pdf(file)
+
+            if not rows:
+                return "PDF okunamadı"
+
+            cols = detect_columns(rows)
+
+            GLOBAL_STATE["rows"] = rows
+
+            return render_template_string(HTML, step=1, cols=cols)
+
+        # 2. analiz
+        else:
+
+            mixer_idx = int(request.form.get("mixer"))
+            value_idx = int(request.form.get("value"))
+
+            rows = GLOBAL_STATE["rows"]
+
+            result = analyze(rows, mixer_idx, value_idx)
+
+            return render_template_string(HTML, step=2, r=result)
+
+    return render_template_string(HTML, step=0)
 
 
 if __name__ == "__main__":
