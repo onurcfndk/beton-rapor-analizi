@@ -15,7 +15,6 @@ def parse_pdf(file):
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
 
-            # TEXT (fck için)
             t = page.extract_text()
             if t:
                 text += t
@@ -32,29 +31,26 @@ def parse_pdf(file):
                 try:
                     mixer_raw = str(row[1]).strip()
 
-                    # SADECE SAYI OLAN MİKSER
                     if not mixer_raw.isdigit():
                         continue
 
                     mixer = mixer_raw
 
-                    # 28 GÜNLÜK DEĞER (SONDAN 2. SÜTUN)
-                    val_raw = str(row[-2]).replace(",", ".").strip()
+                    # 🔥 28 GÜN DEĞER ( * temizleniyor )
+                    val_raw = str(row[-2]).replace(",", ".").replace("*", "").strip()
 
-                    # boşsa (7 gün)
                     if val_raw == "" or val_raw.lower() == "none":
                         continue
 
                     value = float(val_raw)
 
-                    # filtre
                     if 20 < value < 80:
                         mixers.setdefault(mixer, []).append(value)
 
                 except:
                     continue
 
-    # 🔥 HER MİKSERDEN SADECE 3 DEĞER AL
+    # sadece 3 değer
     clean_mixers = {}
     for m, vals in mixers.items():
         if len(vals) >= 3:
@@ -62,7 +58,7 @@ def parse_pdf(file):
 
     values = [v for arr in clean_mixers.values() for v in arr]
 
-    # 🔥 FCK (C25/30 → 30)
+    # fck
     match = re.search(r"C(\d{2})/(\d{2})", text)
     fck = int(match.group(2)) if match else 30
 
@@ -80,7 +76,6 @@ def analyze(fck, mixers, values):
 
     mixer_count = len(mixers)
 
-    # 🔥 TS KURALI (MİKSER SAYISI)
     if mixer_count == 1:
         limit = fck
     elif 2 <= mixer_count <= 4:
@@ -111,7 +106,7 @@ def analyze(fck, mixers, values):
             reason.append("Dağılım fazla")
 
         if not strength_ok:
-            reason.append("Dayanım düşük")
+            reason.append(f"Dayanım düşük (fck-4={fck-4})")
 
         if reason:
             m_status = "PROBLEM"
@@ -139,12 +134,18 @@ def analyze(fck, mixers, values):
     }
 
 
-# ---------------- ARAYÜZ ----------------
+# ---------------- UI ----------------
 HTML = """
+<style>
+body { font-family: Arial; padding:20px; }
+.ok { color: green; font-weight: bold; }
+.bad { color: red; font-weight: bold; }
+.box { border:1px solid #ddd; padding:10px; margin:10px 0; border-radius:8px;}
+</style>
+
 <h2>BETON ANALİZ SİSTEMİ</h2>
 
 <form method="post" enctype="multipart/form-data">
-    PDF yükle:
     <input type="file" name="file">
     <button type="submit">Analiz Et</button>
 </form>
@@ -152,25 +153,36 @@ HTML = """
 {% if r %}
 
     {% if r.error %}
-        <p style="color:red">{{r.error}}</p>
+        <p class="bad">{{r.error}}</p>
     {% else %}
 
+        <div class="box">
         <h3>GENEL SONUÇ</h3>
         Fck: {{r.fck}} <br>
         28 Gün Numune: {{r.numune}} <br>
         Ortalama: {{r.ortalama}} <br>
         Minimum: {{r.min}} <br>
         Limit: {{r.limit}} <br>
-        <b>Durum: {{r.status}}</b> <br>
+        Durum:
+        <span class="{{'ok' if r.status=='UYGUN' else 'bad'}}">
+            {{r.status}}
+        </span>
+        </div>
 
         <h3>MİKSER DETAY</h3>
+
         {% for m in r.mixers %}
+        <div class="box">
             <b>Mikser {{m.mixer}}</b><br>
             Değerler: {{m.values}} <br>
             Ortalama: {{m.avg}} <br>
             Max-Min: {{m.diff}} (Limit: {{m.limit}}) <br>
-            Durum: {{m.status}} <br>
-            Açıklama: {{m.reason}} <br><br>
+            Durum:
+            <span class="{{'ok' if m.status=='OK' else 'bad'}}">
+                {{m.status}}
+            </span><br>
+            Açıklama: {{m.reason}}
+        </div>
         {% endfor %}
 
         <h3>Problemli Mikserler</h3>
