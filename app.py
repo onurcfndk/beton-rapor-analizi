@@ -3,75 +3,64 @@ import pdfplumber
 import numpy as np
 import re
 
+# OCR EKLİYORUZ
+from PIL import Image
+import pytesseract
+
 app = Flask(__name__)
 
-# ---------------- PDF PARSER (ROBUST) ----------------
+
+# ---------------- PDF → OCR + TEXT ----------------
 def parse_pdf(file):
+
     text = ""
 
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
 
-            # 1) tablo dene
-            table = page.extract_table()
-            if table:
-                for row in table:
-                    if row:
-                        text += " ".join([str(x) for x in row if x])
+            # 1) normal text
+            t = page.extract_text()
+            if t:
+                text += " " + t
 
-            # 2) text dene (KRİTİK FIX)
-            page_text = page.extract_text()
-            if page_text:
-                text += " " + page_text
+            # 2) OCR (KRİTİK FIX)
+            try:
+                img = page.to_image(resolution=300).original
+                ocr = pytesseract.image_to_string(img, lang="eng")
+                text += " " + ocr
+            except:
+                pass
 
-    text = text.strip()
-
-    if not text:
+    if not text.strip():
         return None, {}, []
 
-    # ---------------- BETON SINIFI ----------------
+    # Beton sınıfı
     match = re.search(r"C(\d{2})/(\d{2})", text)
 
     fck = None
     if match:
-        fck = int(match.group(2))  # küp
+        fck = int(match.group(2))
 
-    # ---------------- MİKSERLER ----------------
-    mixers = {}
-    current = None
+    # Sayılar
+    numbers = re.findall(r"\d+\.\d+|\d+", text)
 
-    lines = text.split("\n")
+    values = []
+    for n in numbers:
+        try:
+            v = float(str(n).replace(",", "."))
+            if 10 < v < 120:
+                values.append(v)
+        except:
+            pass
 
-    for line in lines:
-
-        m = re.search(r"Mikser\s*(\d+)", line)
-        if m:
-            current = m.group(1)
-            if current not in mixers:
-                mixers[current] = []
-            continue
-
-        nums = re.findall(r"\d+\.\d+|\d+", line)
-
-        if current:
-            for n in nums:
-                try:
-                    v = float(n.replace(",", "."))
-                    if 10 < v < 120:
-                        mixers[current].append(v)
-                except:
-                    pass
-
-    values = [v for vals in mixers.values() for v in vals]
-
-    return fck, mixers, values
+    return fck, {}, values
 
 
 # ---------------- ANALİZ ----------------
-def analyze(fck, values, mixers):
+def analyze(fck, values):
 
     if not values:
-        return {"error": "PDF'den hiç sayısal veri çekilemedi"}
+        return {"error": "OCR dahil hiçbir veri okunamadı"}
 
     if not fck:
         return {"error": "Beton sınıfı bulunamadı"}
@@ -92,38 +81,11 @@ def analyze(fck, values, mixers):
     if avg < limit or min_val < fck - 4:
         status = "UYGUN DEĞİL"
 
-    mixer_results = []
-    bad = []
-
-    for m, vals in mixers.items():
-
-        if not vals:
-            continue
-
-        m_avg = np.mean(vals)
-        diff = max(vals) - min(vals)
-
-        dist_ok = diff <= (0.15 * m_avg)
-        strength_ok = m_avg >= (fck - 4)
-
-        if not dist_ok or not strength_ok:
-            bad.append(m)
-
-        mixer_results.append({
-            "mixer": m,
-            "avg": round(m_avg, 2),
-            "diff": round(diff, 2),
-            "dist": dist_ok,
-            "strength": strength_ok
-        })
-
     return {
         "fck": fck,
         "avg": round(avg, 2),
         "min": round(min_val, 2),
         "status": status,
-        "mixers": mixer_results,
-        "bad": bad,
         "count": len(values),
         "worst3": sorted(values)[:3]
     }
@@ -131,7 +93,7 @@ def analyze(fck, values, mixers):
 
 # ---------------- UI ----------------
 HTML = """
-<h2>BETON PDF ANALİZ</h2>
+<h2>BETON PDF ANALİZ (OCR)</h2>
 
 <form method="post" enctype="multipart/form-data">
     PDF:
@@ -151,19 +113,11 @@ HTML = """
         Minimum: {{r.min}} <br>
         Durum: {{r.status}} <br>
 
-        <h4>Mikserler</h4>
-        {% for m in r.mixers %}
-            Mikser {{m.mixer}} → {{m.avg}} ({{m.diff}})
-            <br>
-        {% endfor %}
-
-        <h4>Problemli Mikserler</h4>
-        {{r.bad}}
-
         <h4>En düşük 3</h4>
         {{r.worst3}}
 
     {% endif %}
+
 {% endif %}
 """
 
@@ -175,8 +129,8 @@ def home():
     if request.method == "POST":
         file = request.files.get("file")
 
-        fck, mixers, values = parse_pdf(file)
-        result = analyze(fck, values, mixers)
+        fck, _, values = parse_pdf(file)
+        result = analyze(fck, values)
 
     return render_template_string(HTML, r=result)
 
