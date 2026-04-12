@@ -6,81 +6,83 @@ import re
 app = Flask(__name__)
 
 
-# ---------------- PDF TABLO OKUMA ----------------
+# ---------------- PDF TABLO ANALİZ ----------------
 def parse_pdf(file):
 
-    text_rows = []
+    table_data = []
 
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-
             table = page.extract_table()
 
             if table:
                 for row in table:
                     if row:
-                        clean_row = [str(x).strip() if x else "" for x in row]
-                        text_rows.append(clean_row)
+                        table_data.append(row)
 
-    if not text_rows:
-        return None, {}, []
+    if not table_data:
+        return None, {}
 
-    # ---------------- BETON SINIFI ----------------
-    full_text = " ".join([" ".join(r) for r in text_rows])
+    # ---------------- HEADER BUL ----------------
+    header = None
+    for row in table_data:
+        if any("28" in str(x) for x in row):
+            header = row
+            break
 
-    match = re.search(r"C(\d{2})/(\d{2})", full_text)
+    if not header:
+        return None, {}
+
+    # kolon indexleri
+    try:
+        mixer_idx = next(i for i, x in enumerate(header) if "mikser" in str(x).lower())
+        value_idx = next(i for i, x in enumerate(header) if "28" in str(x))
+    except:
+        return None, {}
+
+    mixers = {}
+
+    for row in table_data:
+
+        if len(row) <= max(mixer_idx, value_idx):
+            continue
+
+        try:
+            mixer = str(row[mixer_idx]).strip()
+            value = str(row[value_idx]).replace(",", ".")
+
+            if not mixer or mixer.lower() == "none":
+                continue
+
+            v = float(value)
+
+            if 10 < v < 120:
+                mixers.setdefault(mixer, []).append(v)
+
+        except:
+            continue
+
+    all_values = [v for vals in mixers.values() for v in vals]
+
+    # fck bul
+    text = " ".join([" ".join(map(str, r)) for r in table_data])
+    match = re.search(r"C(\d{2})/(\d{2})", text)
 
     fck = int(match.group(2)) if match else None
 
-
-    # ---------------- 28 GÜN SÜTUNU BUL ----------------
-    # (varsayım: "28" geçen kolon hedef kolon)
-    values = []
-    mixers = {}
-
-    for row in text_rows:
-
-        if len(row) < 3:
-            continue
-
-        # mikser numarası
-        m = re.search(r"\d+", row[0])
-        mixer_id = m.group() if m else None
-
-        for cell in row:
-
-            if not cell:
-                continue
-
-            if "28" in cell or re.match(r"^\d+(\.\d+)?$", cell):
-
-                try:
-                    v = float(cell.replace(",", "."))
-                    if 10 < v < 120:
-
-                        values.append(v)
-
-                        if mixer_id:
-                            mixers.setdefault(mixer_id, []).append(v)
-
-                except:
-                    pass
-
-    return fck, mixers, values
+    return fck, mixers, all_values
 
 
 # ---------------- ANALİZ ----------------
 def analyze(fck, values, mixers):
 
     if not values or not fck:
-        return {"error": "PDF kolonları doğru okunamadı"}
+        return {"error": "Tablo doğru okunamadı"}
 
     avg = np.mean(values)
     min_val = min(values)
-
     n = len(values)
 
-    # TS mantığı
     if n == 1:
         limit = fck
     elif n <= 4:
@@ -91,7 +93,6 @@ def analyze(fck, values, mixers):
     status = "UYGUN"
     if avg < limit or min_val < fck - 4:
         status = "UYGUN DEĞİL"
-
 
     mixer_results = []
     bad = []
@@ -104,10 +105,7 @@ def analyze(fck, values, mixers):
         m_avg = np.mean(vals)
         diff = max(vals) - min(vals)
 
-        dist_ok = diff <= (0.15 * m_avg)
-        strength_ok = m_avg >= (fck - 4)
-
-        if not dist_ok or not strength_ok:
+        if diff > 0.15 * m_avg or m_avg < (fck - 4):
             bad.append(m)
 
         mixer_results.append({
@@ -115,7 +113,6 @@ def analyze(fck, values, mixers):
             "avg": round(m_avg, 2),
             "diff": round(diff, 2)
         })
-
 
     return {
         "fck": fck,
@@ -131,7 +128,7 @@ def analyze(fck, values, mixers):
 
 # ---------------- UI ----------------
 HTML = """
-<h2>BETON ANALİZ (PRO TABLO)</h2>
+<h2>BETON ANALİZ (TABLO DOĞRU VERSİYON)</h2>
 
 <form method="post" enctype="multipart/form-data">
     PDF:
@@ -158,9 +155,6 @@ HTML = """
 
         <h4>Problemli Mikserler</h4>
         {{r.bad}}
-
-        <h4>En düşük 3</h4>
-        {{r.worst3}}
 
     {% endif %}
 
