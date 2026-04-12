@@ -3,45 +3,37 @@ import pdfplumber
 import numpy as np
 import re
 
-# OCR EKLİYORUZ
-from PIL import Image
-import pytesseract
-
 app = Flask(__name__)
 
-
-# ---------------- PDF → OCR + TEXT ----------------
+# ---------------- PDF OKUMA (SADE VE STABİL) ----------------
 def parse_pdf(file):
-
     text = ""
 
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
+    try:
+        with pdfplumber.open(file) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t:
+                    text += " " + t
+    except:
+        return None, []
 
-            # 1) normal text
-            t = page.extract_text()
-            if t:
-                text += " " + t
+    text = text.strip()
 
-            # 2) OCR (KRİTİK FIX)
-            try:
-                img = page.to_image(resolution=300).original
-                ocr = pytesseract.image_to_string(img, lang="eng")
-                text += " " + ocr
-            except:
-                pass
+    if not text:
+        return None, []
 
-    if not text.strip():
-        return None, {}, []
-
-    # Beton sınıfı
+    # Beton sınıfı (C25/30 → 30 alınır)
     match = re.search(r"C(\d{2})/(\d{2})", text)
 
     fck = None
     if match:
-        fck = int(match.group(2))
+        try:
+            fck = int(match.group(2))
+        except:
+            fck = None
 
-    # Sayılar
+    # SAYILAR
     numbers = re.findall(r"\d+\.\d+|\d+", text)
 
     values = []
@@ -53,14 +45,14 @@ def parse_pdf(file):
         except:
             pass
 
-    return fck, {}, values
+    return fck, values
 
 
 # ---------------- ANALİZ ----------------
 def analyze(fck, values):
 
     if not values:
-        return {"error": "OCR dahil hiçbir veri okunamadı"}
+        return {"error": "PDF'den sayısal veri çekilemedi"}
 
     if not fck:
         return {"error": "Beton sınıfı bulunamadı"}
@@ -70,6 +62,7 @@ def analyze(fck, values):
 
     n = len(values)
 
+    # TS mantığı
     if n == 1:
         limit = fck
     elif n <= 4:
@@ -93,7 +86,7 @@ def analyze(fck, values):
 
 # ---------------- UI ----------------
 HTML = """
-<h2>BETON PDF ANALİZ (OCR)</h2>
+<h2>Beton PDF Analiz Sistemi</h2>
 
 <form method="post" enctype="multipart/form-data">
     PDF:
@@ -107,13 +100,15 @@ HTML = """
         <p style="color:red">{{r.error}}</p>
     {% else %}
 
+        <h3>SONUÇ</h3>
+
         Fck: {{r.fck}} <br>
         Numune: {{r.count}} <br>
         Ortalama: {{r.avg}} <br>
         Minimum: {{r.min}} <br>
         Durum: {{r.status}} <br>
 
-        <h4>En düşük 3</h4>
+        <h4>En düşük 3 değer</h4>
         {{r.worst3}}
 
     {% endif %}
@@ -128,8 +123,7 @@ def home():
 
     if request.method == "POST":
         file = request.files.get("file")
-
-        fck, _, values = parse_pdf(file)
+        fck, values = parse_pdf(file)
         result = analyze(fck, values)
 
     return render_template_string(HTML, r=result)
