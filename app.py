@@ -1,74 +1,91 @@
 from flask import Flask, request, render_template_string
 import pdfplumber
 import numpy as np
+import re
 
 app = Flask(__name__)
 
 
-# ---------------- PDF OKUMA (SABİT KOLON) ----------------
+# ---------------- PDF OKUMA (ROBUST) ----------------
 def parse_pdf(file):
 
+    all_text = ""
     rows = []
 
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
+
+            # 1. TABLO DENEME
             table = page.extract_table()
 
             if table:
                 for r in table:
-                    if r and any(r):
+                    if r:
                         rows.append(r)
 
-    if not rows:
-        return None, {}, []
+            # 2. TEXT FALLBACK
+            text = page.extract_text()
+            if text:
+                all_text += " " + text
 
-    # ---------------- HEADER BUL ----------------
-    header = None
-    for r in rows:
-        if r and any("28" in str(x) for x in r):
-            header = r
-            break
 
-    if not header:
-        return None, {}, []
+    # ---------------- FCK BUL ----------------
+    match = re.search(r"C(\d{2})/(\d{2})", all_text)
+    fck = int(match.group(2)) if match else None
 
-    # ---------------- KOLON İNDEXLERİ ----------------
-    try:
-        mixer_idx = next(i for i, x in enumerate(header) if "mikser" in str(x).lower())
-        value_idx = next(i for i, x in enumerate(header) if "28" in str(x))
-    except:
-        return None, {}, []
 
     mixers = {}
+    values = []
 
-    for r in rows:
+    # ---------------- TABLO VARSA ----------------
+    if rows:
 
-        if len(r) <= max(mixer_idx, value_idx):
-            continue
+        # header bul
+        header = None
+        for r in rows:
+            if any("28" in str(x) for x in r):
+                header = r
+                break
 
-        try:
-            mixer = str(r[mixer_idx]).strip()
-            value = str(r[value_idx]).replace(",", ".")
+        if header:
 
-            if not mixer or mixer.lower() == "none":
-                continue
+            try:
+                mixer_idx = next(i for i,x in enumerate(header) if "mikser" in str(x).lower())
+                value_idx = next(i for i,x in enumerate(header) if "28" in str(x))
+            except:
+                mixer_idx = 0
+                value_idx = -1
 
-            v = float(value)
+            for r in rows:
 
-            if 10 < v < 120:
-                mixers.setdefault(mixer, []).append(v)
+                if len(r) <= max(mixer_idx, value_idx):
+                    continue
 
-        except:
-            continue
+                try:
+                    mixer = str(r[mixer_idx]).strip()
+                    value = str(r[value_idx]).replace(",", ".")
 
-    values = [v for arr in mixers.values() for v in arr]
+                    v = float(value)
 
-    # fck bul (C25/30 → 30)
-    import re
-    text = " ".join([" ".join(map(str, r)) for r in rows])
-    match = re.search(r"C(\d{2})/(\d{2})", text)
+                    if 10 < v < 120:
+                        mixers.setdefault(mixer, []).append(v)
+                        values.append(v)
 
-    fck = int(match.group(2)) if match else None
+                except:
+                    continue
+
+    # ---------------- TABLO YOKSA TEXT ----------------
+    if not values:
+
+        nums = re.findall(r"\d+\.\d+|\d+", all_text)
+
+        for n in nums:
+            try:
+                v = float(n)
+                if 10 < v < 120:
+                    values.append(v)
+            except:
+                pass
 
     return fck, mixers, values
 
@@ -77,13 +94,12 @@ def parse_pdf(file):
 def analyze(fck, values, mixers):
 
     if not values or not fck:
-        return {"error": "PDF veri okunamadı"}
+        return {"error": "PDF içinden yeterli veri çıkarılamadı"}
 
     avg = np.mean(values)
     min_val = min(values)
     n = len(values)
 
-    # TS limit
     if n == 1:
         limit = fck
     elif n <= 4:
@@ -99,6 +115,9 @@ def analyze(fck, values, mixers):
     bad = []
 
     for m, vals in mixers.items():
+
+        if not vals:
+            continue
 
         m_avg = np.mean(vals)
         diff = max(vals) - min(vals)
@@ -124,9 +143,8 @@ def analyze(fck, values, mixers):
     }
 
 
-# ---------------- UI ----------------
 HTML = """
-<h2>BETON ANALİZ SİSTEMİ (FINAL STABLE)</h2>
+<h2>BETON ANALİZ (ROBUST VERSİYON)</h2>
 
 <form method="post" enctype="multipart/form-data">
     PDF:
@@ -145,14 +163,6 @@ HTML = """
         Ortalama: {{r.avg}} <br>
         Minimum: {{r.min}} <br>
         Durum: {{r.status}} <br>
-
-        <h4>Mikserler</h4>
-        {% for m in r.mixers %}
-            Mikser {{m.mixer}} → {{m.avg}} ({{m.diff}}) <br>
-        {% endfor %}
-
-        <h4>Problemli Mikserler</h4>
-        {{r.bad}}
 
     {% endif %}
 
