@@ -36,7 +36,6 @@ def parse_pdf(file):
 
                     mixer = mixer_raw
 
-                    # 🔥 28 GÜN DEĞER ( * temizleniyor )
                     val_raw = str(row[-2]).replace(",", ".").replace("*", "").strip()
 
                     if val_raw == "" or val_raw.lower() == "none":
@@ -50,7 +49,6 @@ def parse_pdf(file):
                 except:
                     continue
 
-    # sadece 3 değer
     clean_mixers = {}
     for m, vals in mixers.items():
         if len(vals) >= 3:
@@ -58,7 +56,6 @@ def parse_pdf(file):
 
     values = [v for arr in clean_mixers.values() for v in arr]
 
-    # fck
     match = re.search(r"C(\d{2})/(\d{2})", text)
     fck = int(match.group(2)) if match else 30
 
@@ -99,27 +96,31 @@ def analyze(fck, mixers, values):
         dist_ok = diff <= limit_diff
         strength_ok = m_avg >= (fck - 4)
 
+        explanations = []
+
+        if dist_ok:
+            explanations.append("Dağılım uygun (max-min ≤ %15 ortalama)")
+        else:
+            explanations.append("Dağılım fazla (limit aşıldı)")
+
+        if strength_ok:
+            explanations.append(f"Dayanım yeterli (≥ {fck-4})")
+        else:
+            explanations.append(f"Dayanım yetersiz (< {fck-4})")
+
         m_status = "OK"
-        reason = []
-
-        if not dist_ok:
-            reason.append("Dağılım fazla")
-
-        if not strength_ok:
-            reason.append(f"Dayanım düşük (fck-4={fck-4})")
-
-        if reason:
+        if not dist_ok or not strength_ok:
             m_status = "PROBLEM"
             bad_mixers.append(m)
 
         mixer_results.append({
             "mixer": m,
-            "values": [round(v,1) for v in vals],
+            "vals": [round(v,1) for v in vals],  # 🔥 FIX
             "avg": round(m_avg, 2),
             "diff": round(diff, 2),
             "limit": round(limit_diff, 2),
             "status": m_status,
-            "reason": ", ".join(reason) if reason else "Sorun yok"
+            "explanations": explanations
         })
 
     return {
@@ -137,13 +138,32 @@ def analyze(fck, mixers, values):
 # ---------------- UI ----------------
 HTML = """
 <style>
-body { font-family: Arial; padding:20px; }
-.ok { color: green; font-weight: bold; }
-.bad { color: red; font-weight: bold; }
-.box { border:1px solid #ddd; padding:10px; margin:10px 0; border-radius:8px;}
+body { font-family: Arial; background:#f4f6f9; padding:20px; }
+
+.header {
+    background:#2c3e50;
+    color:white;
+    padding:15px;
+    border-radius:10px;
+    margin-bottom:20px;
+}
+
+.card {
+    background:white;
+    padding:15px;
+    margin:10px 0;
+    border-radius:10px;
+    box-shadow:0 2px 5px rgba(0,0,0,0.1);
+}
+
+.ok { color:green; font-weight:bold; }
+.bad { color:red; font-weight:bold; }
+
 </style>
 
+<div class="header">
 <h2>BETON ANALİZ SİSTEMİ</h2>
+</div>
 
 <form method="post" enctype="multipart/form-data">
     <input type="file" name="file">
@@ -156,10 +176,10 @@ body { font-family: Arial; padding:20px; }
         <p class="bad">{{r.error}}</p>
     {% else %}
 
-        <div class="box">
+        <div class="card">
         <h3>GENEL SONUÇ</h3>
         Fck: {{r.fck}} <br>
-        28 Gün Numune: {{r.numune}} <br>
+        Numune: {{r.numune}} <br>
         Ortalama: {{r.ortalama}} <br>
         Minimum: {{r.min}} <br>
         Limit: {{r.limit}} <br>
@@ -169,24 +189,30 @@ body { font-family: Arial; padding:20px; }
         </span>
         </div>
 
-        <h3>MİKSER DETAY</h3>
+        <h3>MİKSER ANALİZİ</h3>
 
         {% for m in r.mixers %}
-        <div class="box">
+        <div class="card">
             <b>Mikser {{m.mixer}}</b><br>
-            Değerler: {{m.values}} <br>
+            Değerler: {{m.vals}} <br>
             Ortalama: {{m.avg}} <br>
             Max-Min: {{m.diff}} (Limit: {{m.limit}}) <br>
             Durum:
             <span class="{{'ok' if m.status=='OK' else 'bad'}}">
                 {{m.status}}
             </span><br>
-            Açıklama: {{m.reason}}
+
+            <b>Açıklama:</b><br>
+            {% for e in m.explanations %}
+                - {{e}}<br>
+            {% endfor %}
         </div>
         {% endfor %}
 
+        <div class="card">
         <h3>Problemli Mikserler</h3>
         {{r.bad_mixers}}
+        </div>
 
     {% endif %}
 
