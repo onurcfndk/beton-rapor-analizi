@@ -5,30 +5,40 @@ import re
 
 app = Flask(__name__)
 
-# ---------------- PDF PARSER (TABLE BASED) ----------------
+# ---------------- PDF PARSER (ROBUST) ----------------
 def parse_pdf(file):
     text = ""
 
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            table = page.extract_table()
 
+            # 1) tablo dene
+            table = page.extract_table()
             if table:
                 for row in table:
                     if row:
                         text += " ".join([str(x) for x in row if x])
 
-    # Beton sınıfı
+            # 2) text dene (KRİTİK FIX)
+            page_text = page.extract_text()
+            if page_text:
+                text += " " + page_text
+
+    text = text.strip()
+
+    if not text:
+        return None, {}, []
+
+    # ---------------- BETON SINIFI ----------------
     match = re.search(r"C(\d{2})/(\d{2})", text)
 
     fck = None
     if match:
         fck = int(match.group(2))  # küp
 
-    # Mikser bazlı ayırma
+    # ---------------- MİKSERLER ----------------
     mixers = {}
-
-    current_mixer = None
+    current = None
 
     lines = text.split("\n")
 
@@ -36,32 +46,35 @@ def parse_pdf(file):
 
         m = re.search(r"Mikser\s*(\d+)", line)
         if m:
-            current_mixer = m.group(1)
-            if current_mixer not in mixers:
-                mixers[current_mixer] = []
+            current = m.group(1)
+            if current not in mixers:
+                mixers[current] = []
             continue
 
         nums = re.findall(r"\d+\.\d+|\d+", line)
 
-        if current_mixer:
+        if current:
             for n in nums:
                 try:
-                    v = float(n)
+                    v = float(n.replace(",", "."))
                     if 10 < v < 120:
-                        mixers[current_mixer].append(v)
+                        mixers[current].append(v)
                 except:
                     pass
 
-    all_values = [v for vals in mixers.values() for v in vals]
+    values = [v for vals in mixers.values() for v in vals]
 
-    return fck, mixers, all_values
+    return fck, mixers, values
 
 
-# ---------------- ENGINE ----------------
+# ---------------- ANALİZ ----------------
 def analyze(fck, values, mixers):
 
-    if not values or not fck:
-        return {"error": "Veri okunamadı"}
+    if not values:
+        return {"error": "PDF'den hiç sayısal veri çekilemedi"}
+
+    if not fck:
+        return {"error": "Beton sınıfı bulunamadı"}
 
     avg = np.mean(values)
     min_val = min(values)
@@ -84,11 +97,11 @@ def analyze(fck, values, mixers):
 
     for m, vals in mixers.items():
 
-        m_avg = np.mean(vals)
-        m_min = min(vals)
-        m_max = max(vals)
+        if not vals:
+            continue
 
-        diff = m_max - m_min
+        m_avg = np.mean(vals)
+        diff = max(vals) - min(vals)
 
         dist_ok = diff <= (0.15 * m_avg)
         strength_ok = m_avg >= (fck - 4)
@@ -118,7 +131,7 @@ def analyze(fck, values, mixers):
 
 # ---------------- UI ----------------
 HTML = """
-<h2>BETON PDF ANALİZ (PRO)</h2>
+<h2>BETON PDF ANALİZ</h2>
 
 <form method="post" enctype="multipart/form-data">
     PDF:
@@ -127,6 +140,7 @@ HTML = """
 </form>
 
 {% if r %}
+
     {% if r.error %}
         <p style="color:red">{{r.error}}</p>
     {% else %}
@@ -162,7 +176,6 @@ def home():
         file = request.files.get("file")
 
         fck, mixers, values = parse_pdf(file)
-
         result = analyze(fck, values, mixers)
 
     return render_template_string(HTML, r=result)
