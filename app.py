@@ -6,93 +6,67 @@ import re
 app = Flask(__name__)
 
 
-# ---------------- SMART COLUMN FINDER ----------------
-def find_column(rows, keyword_list):
-
-    for r in rows[:5]:  # sadece üst kısım
-
-        for i, cell in enumerate(r):
-
-            cell_str = str(cell).lower()
-
-            for kw in keyword_list:
-                if kw in cell_str:
-                    return i
-
-    return None
-
-
-# ---------------- PDF PARSE ----------------
+# ---------------- PDF TEXT PARSER ----------------
 def parse_pdf(file):
 
-    rows = []
-    full_text = ""
+    text = ""
 
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                text += " " + t
 
-            table = page.extract_table()
-            if table:
-                rows.extend(table)
-
-            text = page.extract_text()
-            if text:
-                full_text += " " + text
-
-    if not rows:
+    if not text:
         return None, [], {}
 
     # ---------------- FCK ----------------
-    match = re.search(r"C\s*(\d{2})\s*/\s*(\d{2})", full_text)
+    match = re.search(r"C\s*(\d{2})\s*/\s*(\d{2})", text)
     fck = int(match.group(2)) if match else None
 
-    # ---------------- COLUMN DETECTION ----------------
-    mixer_idx = find_column(rows, ["mikser", "mixer", "t.mikser"])
-    value_idx = find_column(rows, ["28", "28 gün", "28gun", "28-day"])
+    # ---------------- 28 GÜN DEĞERLERİ ----------------
+    # 28 gün geçen sayıları yakala (yakın pattern)
+    values = []
 
-    if mixer_idx is None:
-        mixer_idx = 0
+    pattern = re.findall(r"28\s*[^0-9]{0,10}(\d{2,3}[\.,]?\d*)", text)
 
-    if value_idx is None:
-        value_idx = -1
+    for p in pattern:
+        try:
+            v = float(p.replace(",", "."))
+            values.append(v)
+        except:
+            pass
 
+    # fallback: tüm sayılar (filtreli)
+    if not values:
+        nums = re.findall(r"\d+\.\d+|\d+", text)
+        for n in nums:
+            try:
+                v = float(n)
+                if 10 < v < 120:
+                    values.append(v)
+            except:
+                pass
+
+    # ---------------- MİKSER ----------------
     mixers = {}
 
-    # ---------------- ROW PARSE ----------------
-    for r in rows:
+    mixer_matches = re.findall(r"(?:Mikser|T\.?Mikser)\s*[:\-]?\s*(\d+)", text)
 
-        if len(r) <= max(mixer_idx, value_idx):
-            continue
+    for i, m in enumerate(mixer_matches):
 
-        try:
-            mixer_raw = str(r[mixer_idx]).strip()
-            value_raw = str(r[value_idx]).replace(",", ".")
-
-            mixer = re.findall(r"\d+", mixer_raw)
-            mixer = mixer[0] if mixer else mixer_raw
-
-            value = float(value_raw)
-
-            if 10 < value < 120:
-
-                mixers.setdefault(mixer, []).append(value)
-
-        except:
-            continue
-
-    values = [v for arr in mixers.values() for v in arr]
+        # aynı sıradaki 28 gün değerini bağla
+        if i < len(values):
+            mixers.setdefault(m, []).append(values[i])
 
     return fck, values, mixers
 
 
-# ---------------- ANALYSIS ----------------
+# ---------------- ANALİZ ----------------
 def analyze(fck, values, mixers):
 
-    if not values:
-        return {"error": "Hiç veri çekilemedi (PDF format kontrol)"}
-
-    if not fck:
-        return {"error": "Fck bulunamadı"}
+    if not values or not fck:
+        return {"error": "PDF içinden veri çıkarılamadı (format farklı olabilir)"}
 
     n = len(values)
     avg = np.mean(values)
@@ -113,6 +87,9 @@ def analyze(fck, values, mixers):
     bad = []
 
     for m, vals in mixers.items():
+
+        if not vals:
+            continue
 
         m_avg = np.mean(vals)
         diff = max(vals) - min(vals)
@@ -141,8 +118,9 @@ def analyze(fck, values, mixers):
     }
 
 
+# ---------------- UI ----------------
 HTML = """
-<h2>BETON ANALİZ (SMART PARSER v2)</h2>
+<h2>BETON ANALİZ (TEXT MODE FINAL)</h2>
 
 <form method="post" enctype="multipart/form-data">
     PDF:
@@ -164,7 +142,7 @@ HTML = """
 
         <h4>Mikserler</h4>
         {% for m in r.mixers %}
-            {{m.mixer}} → {{m.avg}} | {{m.diff}} | {{m.status}} <br>
+            Mikser {{m.mixer}} → {{m.avg}} | {{m.status}} <br>
         {% endfor %}
 
         <h4>Problemli</h4>
