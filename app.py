@@ -49,17 +49,21 @@ def parse_pdf(file):
                 except:
                     continue
 
-    clean_mixers = {}
-    for m, vals in mixers.items():
-        if len(vals) >= 3:
-            clean_mixers[m] = vals[:3]
-
-    values = [v for arr in clean_mixers.values() for v in arr]
-
+    # 🔥 FCK + NUMUNE TİPİ
     match = re.search(r"C(\d{2})/(\d{2})", text)
-    fck = int(match.group(2)) if match else 30
+    shape = "silindir" if "silindir" in text.lower() else "kup"
 
-    return fck, clean_mixers, values
+    if match:
+        if shape == "silindir":
+            fck = int(match.group(1))  # 25
+        else:
+            fck = int(match.group(2))  # 30
+    else:
+        fck = 30
+
+    values = [v for arr in mixers.values() for v in arr]
+
+    return fck, mixers, values, shape
 
 
 # ---------------- ANALİZ ----------------
@@ -73,6 +77,7 @@ def analyze(fck, mixers, values):
 
     mixer_count = len(mixers)
 
+    # TS kuralı
     if mixer_count == 1:
         limit = fck
     elif 2 <= mixer_count <= 4:
@@ -88,6 +93,9 @@ def analyze(fck, mixers, values):
     bad_mixers = []
 
     for m, vals in mixers.items():
+
+        if len(vals) < 2:
+            continue  # çok az veri varsa atla
 
         m_avg = np.mean(vals)
         diff = max(vals) - min(vals)
@@ -115,7 +123,8 @@ def analyze(fck, mixers, values):
 
         mixer_results.append({
             "mixer": m,
-            "vals": [round(v,1) for v in vals],  # 🔥 FIX
+            "vals": [round(v,1) for v in vals],
+            "count": len(vals),
             "avg": round(m_avg, 2),
             "diff": round(diff, 2),
             "limit": round(limit_diff, 2),
@@ -138,10 +147,10 @@ def analyze(fck, mixers, values):
 # ---------------- UI ----------------
 HTML = """
 <style>
-body { font-family: Arial; background:#f4f6f9; padding:20px; }
+body { font-family: Arial; background:#eef2f7; padding:20px; }
 
 .header {
-    background:#2c3e50;
+    background:#1f2d3d;
     color:white;
     padding:15px;
     border-radius:10px;
@@ -153,7 +162,7 @@ body { font-family: Arial; background:#f4f6f9; padding:20px; }
     padding:15px;
     margin:10px 0;
     border-radius:10px;
-    box-shadow:0 2px 5px rgba(0,0,0,0.1);
+    box-shadow:0 2px 6px rgba(0,0,0,0.1);
 }
 
 .ok { color:green; font-weight:bold; }
@@ -194,9 +203,11 @@ body { font-family: Arial; background:#f4f6f9; padding:20px; }
         {% for m in r.mixers %}
         <div class="card">
             <b>Mikser {{m.mixer}}</b><br>
+            Numune: {{m.count}} <br>
             Değerler: {{m.vals}} <br>
             Ortalama: {{m.avg}} <br>
             Max-Min: {{m.diff}} (Limit: {{m.limit}}) <br>
+
             Durum:
             <span class="{{'ok' if m.status=='OK' else 'bad'}}">
                 {{m.status}}
@@ -228,7 +239,7 @@ def home():
     if request.method == "POST":
         file = request.files.get("file")
 
-        fck, mixers, values = parse_pdf(file)
+        fck, mixers, values, shape = parse_pdf(file)
         result = analyze(fck, mixers, values)
 
     return render_template_string(HTML, r=result)
