@@ -5,91 +5,80 @@ import re
 
 app = Flask(__name__)
 
-# ---------------- PDF OKUMA ----------------
 def parse_pdf(file):
 
     mixers = {}
-    text = ""
 
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
 
-            t = page.extract_text()
-            if t:
-                text += t
-
             table = page.extract_table()
+
             if not table:
                 continue
 
-            header = table[0]
+            for row in table:
 
-            mixer_col = None
-            value_col = None
-
-            # 🔥 DOĞRU SÜTUNLARI BUL
-            for i, h in enumerate(header):
-                h_str = str(h).lower()
-
-                if "mikser" in h_str:
-                    mixer_col = i
-
-                if "28" in h_str and "numune" in h_str:
-                    value_col = i
-
-            if mixer_col is None or value_col is None:
-                continue
-
-            for row in table[1:]:
-
-                if not row:
+                if not row or len(row) < 4:
                     continue
 
                 try:
-                    mixer_raw = str(row[mixer_col]).strip()
+                    # 🔥 Mikser her zaman 2. sütun
+                    mixer_raw = str(row[1]).strip()
 
                     if not mixer_raw.isdigit():
                         continue
 
                     mixer = mixer_raw
 
-                    val_raw = str(row[value_col]).replace(",", ".").replace("*", "").strip()
+                    # 🔥 Satırdaki TÜM sayıları bul
+                    cells = " ".join([str(c) for c in row])
 
-                    if val_raw == "" or val_raw.lower() == "none":
-                        continue
+                    values = re.findall(r"\d{2,3}[.,]\d", cells)
 
-                    # 🔥 ORTALAMA SÜTUNUNU ENGELLE
-                    if len(val_raw) > 5:
-                        continue
+                    for v in values:
+                        val = float(v.replace(",", "."))
 
-                    value = float(val_raw)
-
-                    if 30 < value < 70:
-                        mixers.setdefault(mixer, []).append(value)
+                        # 🔥 kritik filtre
+                        if 30 < val < 70:
+                            mixers.setdefault(mixer, []).append(val)
 
                 except:
                     continue
 
-    # -------- FCK --------
+    # 🔥 her mikserden sadece SON 3 değeri al (28 gün)
+    clean_mixers = {}
+
+    for m, vals in mixers.items():
+        if len(vals) >= 3:
+            clean_mixers[m] = vals[-3:]
+
+    values = [v for arr in clean_mixers.values() for v in arr]
+
+    # 🔥 FCK
+    text = ""
+    with pdfplumber.open(file) as pdf:
+        for p in pdf.pages:
+            t = p.extract_text()
+            if t:
+                text += t
+
     match = re.search(r"C(\d{2})/(\d{2})", text)
 
     if match:
         if "silindir" in text.lower():
-            shape = "Silindir"
             fck = int(match.group(1))
+            shape = "Silindir"
         else:
-            shape = "Küp"
             fck = int(match.group(2))
+            shape = "Küp"
     else:
-        shape = "Bilinmiyor"
         fck = 30
+        shape = "Bilinmiyor"
 
-    values = [v for arr in mixers.values() for v in arr]
-
-    return fck, mixers, values, shape
+    return fck, clean_mixers, values, shape
 
 
-# ---------------- ANALİZ ----------------
 def analyze(fck, mixers, values, shape):
 
     if not values:
@@ -102,39 +91,28 @@ def analyze(fck, mixers, values, shape):
 
     if mixer_count == 1:
         limit = fck
-    elif 2 <= mixer_count <= 4:
+    elif mixer_count <= 4:
         limit = fck + 1
     else:
         limit = fck + 2
 
-    status = "UYGUN" if (avg >= limit and min_val >= (fck - 4)) else "UYGUN DEĞİL"
+    status = "UYGUN" if (avg >= limit and min_val >= fck-4) else "UYGUN DEĞİL"
 
     mixer_results = []
-    bad_mixers = []
 
     for m, vals in mixers.items():
-
-        if len(vals) < 2:
-            continue
 
         m_avg = np.mean(vals)
         diff = max(vals) - min(vals)
         limit_diff = 0.15 * m_avg
 
-        dist_ok = diff <= limit_diff
-        strength_ok = m_avg >= (fck - 4)
-
-        m_status = "OK" if (dist_ok and strength_ok) else "PROBLEM"
-
-        if m_status == "PROBLEM":
-            bad_mixers.append(m)
+        m_status = "OK" if (diff <= limit_diff and m_avg >= fck-4) else "PROBLEM"
 
         mixer_results.append({
             "mixer": m,
-            "vals": [round(v,1) for v in vals],
-            "avg": round(m_avg, 2),
-            "diff": round(diff, 2),
-            "limit": round(limit_diff, 2),
+            "vals": vals,
+            "avg": round(m_avg,2),
+            "diff": round(diff,2),
             "status": m_status
         })
 
@@ -142,112 +120,65 @@ def analyze(fck, mixers, values, shape):
         "shape": shape,
         "fck": fck,
         "numune": len(values),
-        "ortalama": round(avg, 2),
-        "min": round(min_val, 2),
+        "ortalama": round(avg,2),
+        "min": round(min_val,2),
         "limit": limit,
         "status": status,
-        "mixers": mixer_results,
-        "bad_mixers": bad_mixers
+        "mixers": mixer_results
     }
 
 
-# ---------------- UI ----------------
 HTML = """
 <style>
 body {
-    font-family: 'Segoe UI';
-    background: linear-gradient(135deg,#0f172a,#1e293b);
+    font-family: Arial;
+    background:#0f172a;
     color:white;
-    margin:0;
+    padding:30px;
 }
-
-.container {
-    max-width:900px;
-    margin:auto;
-    padding:40px;
-}
-
-.header {
-    text-align:center;
-    margin-bottom:30px;
-}
-
 .card {
     background:#1e293b;
-    padding:20px;
-    border-radius:12px;
-    margin-top:20px;
-    box-shadow:0 4px 10px rgba(0,0,0,0.4);
+    padding:15px;
+    margin-top:15px;
+    border-radius:10px;
 }
-
-.ok { color:#22c55e; }
-.bad { color:#ef4444; }
-
-.upload {
-    background:#334155;
-    padding:20px;
-    border-radius:12px;
-    text-align:center;
-}
-
 button {
-    background:#3b82f6;
+    background:#22c55e;
+    padding:10px;
     border:none;
-    padding:12px 25px;
-    border-radius:8px;
-    color:white;
-    font-size:16px;
-    cursor:pointer;
-}
-
-button:hover {
-    background:#2563eb;
+    border-radius:5px;
 }
 </style>
 
-<div class="container">
+<h2>Beton Analiz</h2>
 
-<div class="header">
-<h1>Beton Analiz Sistemi</h1>
-</div>
-
-<div class="upload">
 <form method="post" enctype="multipart/form-data">
 <input type="file" name="file"><br><br>
-<button type="submit">Analiz Et</button>
+<button>Analiz Et</button>
 </form>
-</div>
 
 {% if r %}
-    {% if r.error %}
-        <p class="bad">{{r.error}}</p>
-    {% else %}
+{% if r.error %}
+<p>{{r.error}}</p>
+{% else %}
 
-    <div class="card">
-    <h3>Genel Sonuç</h3>
-    Tip: {{r.shape}}<br>
-    Fck: {{r.fck}}<br>
-    Numune: {{r.numune}}<br>
-    Ortalama: {{r.ortalama}}<br>
-    Minimum: {{r.min}}<br>
-    Limit: {{r.limit}}<br>
-    Durum: <span class="{{'ok' if r.status=='UYGUN' else 'bad'}}">{{r.status}}</span>
-    </div>
-
-    {% for m in r.mixers %}
-    <div class="card">
-    <b>Mikser {{m.mixer}}</b><br>
-    {{m.vals}}<br>
-    Ortalama: {{m.avg}}<br>
-    Fark: {{m.diff}}<br>
-    Durum: <span class="{{'ok' if m.status=='OK' else 'bad'}}">{{m.status}}</span>
-    </div>
-    {% endfor %}
-
-    {% endif %}
-{% endif %}
-
+<div class="card">
+Fck: {{r.fck}}<br>
+Numune: {{r.numune}}<br>
+Ortalama: {{r.ortalama}}<br>
+Durum: {{r.status}}
 </div>
+
+{% for m in r.mixers %}
+<div class="card">
+Mikser {{m.mixer}}<br>
+{{m.vals}}<br>
+Durum: {{m.status}}
+</div>
+{% endfor %}
+
+{% endif %}
+{% endif %}
 """
 
 @app.route("/", methods=["GET","POST"])
