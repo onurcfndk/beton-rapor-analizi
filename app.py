@@ -24,10 +24,13 @@ def parse_pdf(file):
 
             header = table[0]
 
-            # 🔥 SADECE DOĞRU SÜTUN
             col_index = None
+
+            # 🔥 ESNEK BAŞLIK BULMA
             for i, h in enumerate(header):
-                if h and "28 Günlük Numune" in str(h):
+                h_str = str(h).lower()
+
+                if "28" in h_str and "gün" in h_str:
                     col_index = i
                     break
 
@@ -52,19 +55,20 @@ def parse_pdf(file):
                     if val_raw == "" or val_raw.lower() == "none":
                         continue
 
-                    # 🔥 ORTALAMA SÜTUNUNU ELE
+                    # ❗ ortalama gibi uzun değerleri ele
                     if len(val_raw) > 5:
                         continue
 
                     value = float(val_raw)
 
-                    if 30 < value < 80:
+                    # ❗ ekstra filtre (çok önemli)
+                    if 30 < value < 70:
                         mixers.setdefault(mixer, []).append(value)
 
                 except:
                     continue
 
-    # 🔥 FCK + ŞEKİL
+    # ---------------- FCK ----------------
     match = re.search(r"C(\d{2})/(\d{2})", text)
 
     if match:
@@ -120,13 +124,10 @@ def analyze(fck, mixers, values, shape):
 
         explanations = []
 
+        explanations.append("✔ Dağılım uygun" if dist_ok else "❌ Dağılım fazla")
         explanations.append(
-            "✔ Dağılım uygun" if dist_ok else "❌ Dağılım fazla (%15 aşıldı)"
-        )
-
-        explanations.append(
-            f"✔ Dayanım yeterli (≥ {fck-4})" if strength_ok
-            else f"❌ Dayanım yetersiz (< {fck-4})"
+            f"✔ Dayanım ≥ {fck-4}" if strength_ok
+            else f"❌ Dayanım < {fck-4}"
         )
 
         m_status = "OK" if (dist_ok and strength_ok) else "PROBLEM"
@@ -163,12 +164,17 @@ HTML = """
 <style>
 body {
     font-family: Arial;
-    background: linear-gradient(135deg, #e3f2fd, #f5f7fa);
-    padding: 20px;
+    background: linear-gradient(135deg, #dfe9f3, #ffffff);
+    padding: 30px;
+}
+
+.container {
+    max-width: 900px;
+    margin: auto;
 }
 
 .header {
-    background: #0d47a1;
+    background: #1e3a8a;
     color: white;
     padding: 20px;
     border-radius: 12px;
@@ -177,25 +183,54 @@ body {
 
 .card {
     background: white;
-    padding: 15px;
-    margin: 15px 0;
+    padding: 20px;
+    margin-top: 20px;
     border-radius: 12px;
-    box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
 }
 
-.ok { color: #2e7d32; font-weight: bold; }
-.bad { color: #c62828; font-weight: bold; }
+.ok { color: #16a34a; font-weight: bold; }
+.bad { color: #dc2626; font-weight: bold; }
 
+.upload-box {
+    margin-top:20px;
+    padding:20px;
+    background:#f1f5f9;
+    border-radius:12px;
+    text-align:center;
+}
+
+input[type=file] {
+    margin-bottom:15px;
+}
+
+button {
+    background:#2563eb;
+    color:white;
+    border:none;
+    padding:12px 25px;
+    border-radius:8px;
+    font-size:16px;
+    cursor:pointer;
+}
+
+button:hover {
+    background:#1d4ed8;
+}
 </style>
+
+<div class="container">
 
 <div class="header">
 <h2>BETON ANALİZ SİSTEMİ</h2>
 </div>
 
+<div class="upload-box">
 <form method="post" enctype="multipart/form-data">
-    <input type="file" name="file">
-    <button type="submit">Analiz Et</button>
+    <input type="file" name="file"><br>
+    <button type="submit">📊 Analiz Et</button>
 </form>
+</div>
 
 {% if r %}
     {% if r.error %}
@@ -215,11 +250,6 @@ body {
     <span class="{{'ok' if r.status=='UYGUN' else 'bad'}}">
         {{r.status}}
     </span>
-
-    <br><br>
-    <b>Kriter:</b><br>
-    - Ortalama ≥ Limit <br>
-    - Minimum ≥ (fck - 4)
     </div>
 
     <h3>MİKSER ANALİZİ</h3>
@@ -230,17 +260,8 @@ body {
         Numune: {{m.count}}<br>
         Değerler: {{m.vals}}<br>
         Ortalama: {{m.avg}}<br>
-        Max-Min: {{m.diff}} (Limit: {{m.limit}})<br>
-
-        Durum:
-        <span class="{{'ok' if m.status=='OK' else 'bad'}}">
-            {{m.status}}
-        </span>
-
-        <br><br>
-        {% for e in m.explanations %}
-            {{e}}<br>
-        {% endfor %}
+        Max-Min: {{m.diff}}<br>
+        Durum: <span class="{{'ok' if m.status=='OK' else 'bad'}}">{{m.status}}</span>
     </div>
     {% endfor %}
 
@@ -251,6 +272,8 @@ body {
 
     {% endif %}
 {% endif %}
+
+</div>
 """
 
 @app.route("/", methods=["GET", "POST"])
