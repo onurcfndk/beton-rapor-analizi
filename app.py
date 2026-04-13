@@ -24,15 +24,17 @@ def parse_pdf(file):
 
             header = table[0]
 
-            # 28 GÜNLÜK SÜTUNU BUL
+            # 🔥 28 GÜNLÜK SÜTUNU BUL (SMART)
             col_index = None
             for i, h in enumerate(header):
-                if h and "28" in str(h) and "Numune" in str(h):
+                h_str = str(h).lower()
+                if "28" in h_str and "numune" in h_str:
                     col_index = i
                     break
 
+            # ❗ fallback (bazen başlık bozuluyor)
             if col_index is None:
-                continue
+                col_index = len(header) - 2
 
             for row in table[1:]:
 
@@ -54,14 +56,14 @@ def parse_pdf(file):
 
                     value = float(val_raw)
 
-                    # sadece mantıklı değerleri al
-                    if 25 < value < 80:
+                    # 🔥 filtre (gerçek beton aralığı)
+                    if 30 < value < 80:
                         mixers.setdefault(mixer, []).append(value)
 
                 except:
                     continue
 
-    # FCK + NUMUNE TİPİ
+    # ---------------- FCK ----------------
     match = re.search(r"C(\d{2})/(\d{2})", text)
 
     if match:
@@ -98,8 +100,10 @@ def analyze(fck, mixers, values, shape):
     else:
         limit = fck + 2
 
-    status = "UYGUN"
-    if avg < limit or min_val < (fck - 4):
+    # 🔥 DURUM
+    if avg >= limit and min_val >= (fck - 4):
+        status = "UYGUN"
+    else:
         status = "UYGUN DEĞİL"
 
     mixer_results = []
@@ -119,19 +123,14 @@ def analyze(fck, mixers, values, shape):
 
         explanations = []
 
-        if dist_ok:
-            explanations.append("Dağılım uygun")
-        else:
-            explanations.append("Dağılım fazla")
+        explanations.append("Dağılım uygun" if dist_ok else "Dağılım fazla")
+        explanations.append(
+            f"Dayanım ≥ {fck-4}" if strength_ok else f"Dayanım < {fck-4}"
+        )
 
-        if strength_ok:
-            explanations.append(f"Dayanım yeterli (≥ {fck-4})")
-        else:
-            explanations.append(f"Dayanım yetersiz (< {fck-4})")
+        m_status = "OK" if (dist_ok and strength_ok) else "PROBLEM"
 
-        m_status = "OK"
-        if not dist_ok or not strength_ok:
-            m_status = "PROBLEM"
+        if m_status == "PROBLEM":
             bad_mixers.append(m)
 
         mixer_results.append({
@@ -160,17 +159,7 @@ def analyze(fck, mixers, values, shape):
 
 # ---------------- UI ----------------
 HTML = """
-<style>
-body { font-family: Arial; background:#eef2f7; padding:20px; }
-.header { background:#1f2d3d; color:white; padding:15px; border-radius:10px; }
-.card { background:white; padding:15px; margin:10px 0; border-radius:10px; }
-.ok { color:green; font-weight:bold; }
-.bad { color:red; font-weight:bold; }
-</style>
-
-<div class="header">
 <h2>BETON ANALİZ SİSTEMİ</h2>
-</div>
 
 <form method="post" enctype="multipart/form-data">
     <input type="file" name="file">
@@ -179,46 +168,37 @@ body { font-family: Arial; background:#eef2f7; padding:20px; }
 
 {% if r %}
     {% if r.error %}
-        <p class="bad">{{r.error}}</p>
+        <p style="color:red">{{r.error}}</p>
     {% else %}
 
-    <div class="card">
-    <h3>GENEL SONUÇ</h3>
+    <h3>GENEL</h3>
     Numune Tipi: {{r.shape}} <br>
     Fck: {{r.fck}} <br>
     Numune: {{r.numune}} <br>
     Ortalama: {{r.ortalama}} <br>
     Minimum: {{r.min}} <br>
     Limit: {{r.limit}} <br>
-    Durum: <span class="{{'ok' if r.status=='UYGUN' else 'bad'}}">{{r.status}}</span><br><br>
+    Durum: <b>{{r.status}}</b><br><br>
 
     <b>Kriter:</b><br>
-    - Ortalama ≥ Limit olmalı <br>
-    - Minimum ≥ (fck - 4) olmalı
-    </div>
+    Ortalama ≥ Limit <br>
+    Minimum ≥ (fck - 4)
 
-    <h3>MİKSER ANALİZİ</h3>
+    <h3>MİKSERLER</h3>
 
     {% for m in r.mixers %}
-    <div class="card">
+        <p>
         <b>Mikser {{m.mixer}}</b><br>
-        Numune: {{m.count}} <br>
-        Değerler: {{m.vals}} <br>
-        Ortalama: {{m.avg}} <br>
-        Max-Min: {{m.diff}} (Limit: {{m.limit}}) <br>
-        Durum: <span class="{{'ok' if m.status=='OK' else 'bad'}}">{{m.status}}</span><br>
-
-        <b>Açıklama:</b><br>
-        {% for e in m.explanations %}
-            - {{e}}<br>
-        {% endfor %}
-    </div>
+        Numune: {{m.count}}<br>
+        Değerler: {{m.vals}}<br>
+        Ortalama: {{m.avg}}<br>
+        Fark: {{m.diff}}<br>
+        Durum: {{m.status}}<br>
+        </p>
     {% endfor %}
 
-    <div class="card">
     <h3>Problemli Mikserler</h3>
     {{r.bad_mixers}}
-    </div>
 
     {% endif %}
 {% endif %}
