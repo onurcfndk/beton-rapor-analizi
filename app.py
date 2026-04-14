@@ -1,260 +1,258 @@
 from flask import Flask, request, render_template_string
 import pdfplumber
-import numpy as np
 import re
 
 app = Flask(__name__)
 
-def parse_pdf(file):
+# -------------------------------
+# SAYI TEMİZLEME ( * ve , düzelt )
+# -------------------------------
+def temizle_sayi(text):
+    if not text:
+        return None
+    text = str(text)
+    text = text.replace("*", "").replace(",", ".")
+    try:
+        return float(text)
+    except:
+        return None
 
+# -------------------------------
+# PDF OKUMA (EN KRİTİK KISIM)
+# -------------------------------
+def parse_pdf(file):
     mixers = {}
-    text = ""
+    all_values = []
+    beton_sinifi = None
+    numune_tipi = None
 
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
+            text = page.extract_text()
+            if not text:
+                continue
 
-            t = page.extract_text()
-            if t:
-                text += "\n" + t
+            # -------------------
+            # BETON SINIFI
+            # -------------------
+            if not beton_sinifi:
+                match = re.search(r'C(\d+)/(\d+)', text)
+                if match:
+                    beton_sinifi = (int(match.group(1)), int(match.group(2)))
 
-            table = page.extract_table()
+            # -------------------
+            # NUMUNE TİPİ
+            # -------------------
+            if not numune_tipi:
+                if "Silindir" in text:
+                    numune_tipi = "silindir"
+                elif "Küp" in text:
+                    numune_tipi = "kup"
 
-            # -------- TABLE YÖNTEMİ --------
-            if table:
-                header = table[0]
+            # -------------------
+            # TABLO SATIR OKUMA
+            # -------------------
+            tables = page.extract_tables()
 
-                mixer_col = None
-                val_col = None
+            for table in tables:
+                for row in table:
+                    if not row or len(row) < 5:
+                        continue
 
-                for i, h in enumerate(header):
-                    h_str = str(h).lower()
-
-                    if "mikser" in h_str:
-                        mixer_col = i
-
-                    if "28" in h_str and "numune" in h_str:
-                        val_col = i
-
-                if mixer_col is not None and val_col is not None:
-
-                    for row in table[1:]:
-
-                        try:
-                            mixer = str(row[mixer_col]).strip()
-
-                            if not mixer.isdigit():
-                                continue
-
-                            raw = str(row[val_col]).replace(",", ".").replace("*", "").strip()
-
-                            if raw == "" or raw.lower() == "none":
-                                continue
-
-                            if len(raw) > 5:
-                                continue
-
-                            val = float(raw)
-
-                            if 30 < val < 70:
-                                mixers.setdefault(mixer, []).append(val)
-
-                        except:
-                            continue
-
-    # -------- FALLBACK (TEXT) --------
-    if not mixers:
-
-        lines = text.split("\n")
-        current_mixer = None
-
-        for line in lines:
-
-            # sadece 1-8 arası mikser kabul et
-            m = re.search(r"\b([1-9])\b", line)
-
-            if m:
-                current_mixer = m.group(1)
-
-            vals = re.findall(r"\d{2,3}[.,]\d", line)
-
-            if current_mixer and vals:
-                for v in vals:
                     try:
-                        val = float(v.replace(",", "."))
-
-                        # kritik filtre
-                        if 30 < val < 70:
-                            mixers.setdefault(current_mixer, []).append(val)
-
+                        mikser = str(row[1]).strip()
                     except:
                         continue
 
-        # her mikserden sadece SON 3 değeri al
-        mixers = {k: v[-3:] for k, v in mixers.items() if len(v) >= 3}
+                    # Mikser numeric değilse geç
+                    if not mikser.isdigit():
+                        continue
 
-    # -------- FCK --------
-    match = re.search(r"C(\d{2})/(\d{2})", text)
+                    # 28 günlük kolon genelde sondan 2. veya 3.
+                    adaylar = row[-3:]
 
-    if match:
-        if "silindir" in text.lower():
-            fck = int(match.group(1))
-            shape = "Silindir"
+                    deger = None
+                    for a in adaylar:
+                        deger = temizle_sayi(a)
+                        if deger:
+                            break
+
+                    if not deger:
+                        continue
+
+                    mixers.setdefault(mikser, []).append(deger)
+                    all_values.append(deger)
+
+    if not all_values:
+        raise Exception("PDF veri okunamadı")
+
+    return mixers, all_values, beton_sinifi, numune_tipi
+
+# -------------------------------
+# ANALİZ
+# -------------------------------
+def analyze(mixers, values, beton_sinifi, numune_tipi):
+
+    # FCK BELİRLE
+    if beton_sinifi:
+        if numune_tipi == "silindir":
+            fck = beton_sinifi[0]
         else:
-            fck = int(match.group(2))
-            shape = "Küp"
+            fck = beton_sinifi[1]
     else:
         fck = 30
-        shape = "Bilinmiyor"
 
-    values = [v for arr in mixers.values() for v in arr]
+    numune = len(values)
+    ortalama = round(sum(values)/numune, 2)
+    minimum = round(min(values), 2)
 
-    return fck, mixers, values, shape
+    # TS KURALI
+    mikser_sayisi = len(mixers)
 
-
-def analyze(fck, mixers, values, shape):
-
-    if not values:
-        return {"error": "PDF veri okunamadı"}
-
-    avg = np.mean(values)
-    min_val = min(values)
-
-    mixer_count = len(mixers)
-
-    if mixer_count == 1:
+    if mikser_sayisi == 1:
         limit = fck
-    elif mixer_count <= 4:
+    elif 2 <= mikser_sayisi <= 4:
         limit = fck + 1
     else:
         limit = fck + 2
 
-    status = "UYGUN" if (avg >= limit and min_val >= fck-4) else "UYGUN DEĞİL"
+    durum = "UYGUN" if (ortalama >= limit and minimum >= (fck - 4)) else "UYGUN DEĞİL"
 
-    mixer_results = []
-    bad = []
+    # -------------------
+    # MİKSER ANALİZ
+    # -------------------
+    mikser_sonuclari = []
 
-    for m, vals in mixers.items():
+    for m, vals in sorted(mixers.items(), key=lambda x: int(x[0])):
 
-        m_avg = np.mean(vals)
-        diff = max(vals) - min(vals)
-        limit_diff = 0.15 * m_avg
+        ort = round(sum(vals)/len(vals), 2)
+        fark = round(max(vals) - min(vals), 2)
+        limit_fark = round(ort * 0.15, 2)
 
-        dist_ok = diff <= limit_diff
-        strength_ok = m_avg >= (fck - 4)
+        dagilim = "UYGUN" if fark <= limit_fark else "PROBLEM"
+        dayanım = "YETERLİ" if ort >= (fck - 4) else "DÜŞÜK"
 
-        if dist_ok and strength_ok:
-            m_status = "OK"
-        else:
-            m_status = "PROBLEM"
-            bad.append(m)
+        genel = "OK" if dagilim == "UYGUN" and dayanım == "YETERLİ" else "PROBLEM"
 
-        desc = [
-            f"Dağılım {'uygun' if dist_ok else 'fazla'} (Fark: {round(diff,2)} / Limit: {round(limit_diff,2)})",
-            f"Dayanım {'yeterli' if strength_ok else 'yetersiz'} (Ortalama: {round(m_avg,2)} / Limit: {fck-4})"
-        ]
-
-        mixer_results.append({
-            "m": m,
-            "vals": [round(v,1) for v in vals],
-            "avg": round(m_avg,2),
-            "diff": round(diff,2),
-            "limit": round(limit_diff,2),
-            "status": m_status,
-            "desc": desc
+        mikser_sonuclari.append({
+            "no": m,
+            "vals": vals,
+            "ort": ort,
+            "fark": fark,
+            "limit": limit_fark,
+            "durum": genel,
+            "dagilim": dagilim,
+            "dayanim": dayanım
         })
 
     return {
-        "shape": shape,
         "fck": fck,
-        "numune": len(values),
-        "avg": round(avg,2),
-        "min": round(min_val,2),
+        "numune": numune,
+        "ortalama": ortalama,
+        "minimum": minimum,
         "limit": limit,
-        "status": status,
-        "mixers": mixer_results,
-        "bad": bad
+        "durum": durum,
+        "tip": numune_tipi,
+        "mikserler": mikser_sonuclari
     }
 
-
+# -------------------------------
+# HTML (PROFESYONEL)
+# -------------------------------
 HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>Beton Analiz</title>
 <style>
-body {
-    font-family: 'Segoe UI';
-    background: linear-gradient(135deg,#0f172a,#1e293b);
-    color:white;
-    margin:0;
-}
-.container {
-    max-width:900px;
-    margin:auto;
-    padding:40px;
-}
-.card {
-    background:#1e293b;
-    padding:20px;
-    border-radius:12px;
-    margin-top:20px;
-}
-.ok {color:#22c55e;}
-.bad {color:#ef4444;}
+body { font-family: Arial; background:#0f172a; color:white; padding:30px;}
+.container { max-width:900px; margin:auto; }
+.card { background:#1e293b; padding:20px; border-radius:10px; margin-top:20px;}
+.ok { color:#22c55e; }
+.bad { color:#ef4444; }
 button {
-    background:#3b82f6;
-    padding:12px 25px;
-    border:none;
-    border-radius:8px;
+ background:#3b82f6; color:white; padding:10px 20px;
+ border:none; border-radius:8px; cursor:pointer;
 }
+input { margin-bottom:10px; }
 </style>
+</head>
+<body>
 
 <div class="container">
-
-<h2>BETON ANALİZ</h2>
+<h1>BETON ANALİZ SİSTEMİ</h1>
 
 <form method="post" enctype="multipart/form-data">
-<input type="file" name="file"><br><br>
-<button>Analiz Et</button>
+<input type="file" name="file">
+<button type="submit">Analiz Et</button>
 </form>
 
-{% if r %}
-{% if r.error %}
-<p class="bad">{{r.error}}</p>
-{% else %}
+{% if result %}
+<div class="card">
+<h2>GENEL</h2>
+<p>Numune Tipi: {{result.tip}}</p>
+<p>Fck: {{result.fck}}</p>
+<p>Numune: {{result.numune}}</p>
+<p>Ortalama: {{result.ortalama}}</p>
+<p>Minimum: {{result.minimum}}</p>
+<p>Limit: {{result.limit}}</p>
+<p class="{{'ok' if result.durum=='UYGUN' else 'bad'}}">{{result.durum}}</p>
+
+<p>Kriter:</p>
+<p>Ortalama ≥ Limit</p>
+<p>Minimum ≥ (fck - 4)</p>
+</div>
 
 <div class="card">
-Fck: {{r.fck}}<br>
-Numune: {{r.numune}}<br>
-Ortalama: {{r.avg}}<br>
-Durum: <span class="{{'ok' if r.status=='UYGUN' else 'bad'}}">{{r.status}}</span>
-</div>
+<h2>MİKSER ANALİZİ</h2>
 
-{% for m in r.mixers %}
-<div class="card">
-<b>Mikser {{m.m}}</b><br>
-{{m.vals}}<br>
-Ortalama: {{m.avg}}<br>
-Fark: {{m.diff}} (Limit: {{m.limit}})<br>
-Durum: {{m.status}}<br><br>
+{% for m in result.mikserler %}
+<p><b>Mikser {{m.no}}</b></p>
+<p>Değerler: {{m.vals}}</p>
+<p>Ortalama: {{m.ort}}</p>
+<p>Fark: {{m.fark}} (Limit: {{m.limit}})</p>
 
-{% for d in m.desc %}
-{{d}}<br>
+<p class="{{'ok' if m.dagilim=='UYGUN' else 'bad'}}">
+Dağılım {{m.dagilim}}
+</p>
+
+<p class="{{'ok' if m.dayanim=='YETERLİ' else 'bad'}}">
+Dayanım {{m.dayanim}} (Limit: {{result.fck - 4}})
+</p>
+
+<p class="{{'ok' if m.durum=='OK' else 'bad'}}">
+Genel: {{m.durum}}
+</p>
+<hr>
 {% endfor %}
 </div>
-{% endfor %}
 
 {% endif %}
-{% endif %}
-
 </div>
+</body>
+</html>
 """
 
-@app.route("/", methods=["GET","POST"])
+# -------------------------------
+# ROUTE
+# -------------------------------
+@app.route("/", methods=["GET", "POST"])
 def home():
-    result=None
-    if request.method=="POST":
-        file=request.files.get("file")
-        fck,mixers,values,shape=parse_pdf(file)
-        result=analyze(fck,mixers,values,shape)
+    result = None
 
-    return render_template_string(HTML,r=result)
+    if request.method == "POST":
+        file = request.files["file"]
+        if file:
+            try:
+                mixers, values, sinif, tip = parse_pdf(file)
+                result = analyze(mixers, values, sinif, tip)
+            except Exception as e:
+                return f"HATA: {str(e)}"
 
-if __name__=="__main__":
-    app.run(host="0.0.0.0",port=10000)
+    return render_template_string(HTML, result=result)
+
+# -------------------------------
+# RUN
+# -------------------------------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
