@@ -5,6 +5,7 @@ import re
 
 app = Flask(__name__)
 
+# ---------------- PDF OKUMA ----------------
 def parse_pdf(file):
 
     mixers = {}
@@ -19,7 +20,6 @@ def parse_pdf(file):
 
             table = page.extract_table()
 
-            # ---------- 1. YÖNTEM: TABLE ----------
             if table:
                 header = table[0]
 
@@ -61,33 +61,7 @@ def parse_pdf(file):
                         except:
                             continue
 
-    # ---------- 2. YÖNTEM: TEXT FALLBACK ----------
-    if not mixers:
-
-        lines = text.split("\n")
-        current_mixer = None
-
-        for line in lines:
-
-            m = re.search(r"\b(\d{1,2})\b", line)
-            vals = re.findall(r"\d{2,3}[.,]\d", line)
-
-            if m:
-                current_mixer = m.group(1)
-
-            if current_mixer and vals:
-                for v in vals:
-                    try:
-                        val = float(v.replace(",", "."))
-                        if 30 < val < 70:
-                            mixers.setdefault(current_mixer, []).append(val)
-                    except:
-                        continue
-
-        # her mikserden son 3 değeri al
-        mixers = {k: v[-3:] for k, v in mixers.items() if len(v) >= 3}
-
-    # ---------- FCK ----------
+    # -------- FCK --------
     match = re.search(r"C(\d{2})/(\d{2})", text)
 
     if match:
@@ -106,6 +80,7 @@ def parse_pdf(file):
     return fck, mixers, values, shape
 
 
+# ---------------- ANALİZ ----------------
 def analyze(fck, mixers, values, shape):
 
     if not values:
@@ -137,29 +112,20 @@ def analyze(fck, mixers, values, shape):
         diff = max_val - min_m
         limit_diff = 0.15 * m_avg
 
-        # 🔥 1. Dağılım kontrolü
+        # kontrol
         dist_ok = diff <= limit_diff
-
-        # 🔥 2. Dayanım kontrolü
         strength_ok = m_avg >= (fck - 4)
 
-        # 🔥 GENEL DURUM
         if dist_ok and strength_ok:
             m_status = "OK"
         else:
             m_status = "PROBLEM"
             bad.append(m)
 
-        # 🔥 AÇIKLAMA
-        desc = []
-        desc.append(
-            f"Dağılım {'uygun' if dist_ok else 'fazla'} "
-            f"(Fark: {round(diff,2)} / Limit: {round(limit_diff,2)})"
-        )
-        desc.append(
-            f"Dayanım {'yeterli' if strength_ok else 'yetersiz'} "
-            f"(Ortalama: {round(m_avg,2)} / Limit: {fck-4})"
-        )
+        desc = [
+            f"Dağılım {'uygun' if dist_ok else 'fazla'} (Fark: {round(diff,2)} / Limit: {round(limit_diff,2)})",
+            f"Dayanım {'yeterli' if strength_ok else 'yetersiz'} (Ortalama: {round(m_avg,2)} / Limit: {fck-4})"
+        ]
 
         mixer_results.append({
             "m": m,
@@ -184,15 +150,45 @@ def analyze(fck, mixers, values, shape):
     }
 
 
+# ---------------- UI ----------------
 HTML = """
 <style>
-body {background:#0f172a;color:white;font-family:Arial;padding:30px;}
-.card {background:#1e293b;padding:15px;margin-top:15px;border-radius:10px;}
-button {background:#22c55e;padding:10px;border:none;border-radius:5px;}
-.ok{color:#22c55e;} .bad{color:#ef4444;}
+body {
+    font-family: 'Segoe UI';
+    background: linear-gradient(135deg,#0f172a,#1e293b);
+    color:white;
+    margin:0;
+}
+.container {
+    max-width:900px;
+    margin:auto;
+    padding:40px;
+}
+.card {
+    background:#1e293b;
+    padding:20px;
+    border-radius:12px;
+    margin-top:20px;
+}
+.ok {color:#22c55e;}
+.bad {color:#ef4444;}
+
+button {
+    background:#3b82f6;
+    border:none;
+    padding:12px 25px;
+    border-radius:8px;
+    color:white;
+    cursor:pointer;
+}
+button:hover {
+    background:#2563eb;
+}
 </style>
 
-<h2>Beton Analiz</h2>
+<div class="container">
+
+<h2>BETON ANALİZ SİSTEMİ</h2>
 
 <form method="post" enctype="multipart/form-data">
 <input type="file" name="file"><br><br>
@@ -205,22 +201,39 @@ button {background:#22c55e;padding:10px;border:none;border-radius:5px;}
 {% else %}
 
 <div class="card">
+<b>GENEL SONUÇ</b><br><br>
+Tip: {{r.shape}}<br>
 Fck: {{r.fck}}<br>
 Numune: {{r.numune}}<br>
 Ortalama: {{r.avg}}<br>
+Minimum: {{r.min}}<br>
+Limit: {{r.limit}}<br>
 Durum: <span class="{{'ok' if r.status=='UYGUN' else 'bad'}}">{{r.status}}</span>
 </div>
 
 {% for m in r.mixers %}
 <div class="card">
-Mikser {{m.m}}<br>
-{{m.vals}}<br>
-Durum: {{m.status}}
+<b>Mikser {{m.m}}</b><br>
+Değerler: {{m.vals}}<br>
+Ortalama: {{m.avg}}<br>
+Fark: {{m.diff}} (Limit: {{m.limit}})<br>
+Durum: <span class="{{'ok' if m.status=='OK' else 'bad'}}">{{m.status}}</span>
+<br><br>
+
+{% for d in m.desc %}
+{{d}}<br>
+{% endfor %}
 </div>
 {% endfor %}
 
+<div class="card">
+<b>Problemli Mikserler:</b> {{r.bad}}
+</div>
+
 {% endif %}
 {% endif %}
+
+</div>
 """
 
 @app.route("/", methods=["GET","POST"])
