@@ -5,7 +5,6 @@ import re
 
 app = Flask(__name__)
 
-# ---------------- PDF OKUMA ----------------
 def parse_pdf(file):
 
     mixers = {}
@@ -20,6 +19,7 @@ def parse_pdf(file):
 
             table = page.extract_table()
 
+            # -------- TABLE YÖNTEMİ --------
             if table:
                 header = table[0]
 
@@ -61,6 +61,37 @@ def parse_pdf(file):
                         except:
                             continue
 
+    # -------- FALLBACK (TEXT) --------
+    if not mixers:
+
+        lines = text.split("\n")
+        current_mixer = None
+
+        for line in lines:
+
+            # sadece 1-8 arası mikser kabul et
+            m = re.search(r"\b([1-9])\b", line)
+
+            if m:
+                current_mixer = m.group(1)
+
+            vals = re.findall(r"\d{2,3}[.,]\d", line)
+
+            if current_mixer and vals:
+                for v in vals:
+                    try:
+                        val = float(v.replace(",", "."))
+
+                        # kritik filtre
+                        if 30 < val < 70:
+                            mixers.setdefault(current_mixer, []).append(val)
+
+                    except:
+                        continue
+
+        # her mikserden sadece SON 3 değeri al
+        mixers = {k: v[-3:] for k, v in mixers.items() if len(v) >= 3}
+
     # -------- FCK --------
     match = re.search(r"C(\d{2})/(\d{2})", text)
 
@@ -80,7 +111,6 @@ def parse_pdf(file):
     return fck, mixers, values, shape
 
 
-# ---------------- ANALİZ ----------------
 def analyze(fck, mixers, values, shape):
 
     if not values:
@@ -106,13 +136,9 @@ def analyze(fck, mixers, values, shape):
     for m, vals in mixers.items():
 
         m_avg = np.mean(vals)
-        max_val = max(vals)
-        min_m = min(vals)
-
-        diff = max_val - min_m
+        diff = max(vals) - min(vals)
         limit_diff = 0.15 * m_avg
 
-        # kontrol
         dist_ok = diff <= limit_diff
         strength_ok = m_avg >= (fck - 4)
 
@@ -150,7 +176,6 @@ def analyze(fck, mixers, values, shape):
     }
 
 
-# ---------------- UI ----------------
 HTML = """
 <style>
 body {
@@ -172,23 +197,17 @@ body {
 }
 .ok {color:#22c55e;}
 .bad {color:#ef4444;}
-
 button {
     background:#3b82f6;
-    border:none;
     padding:12px 25px;
+    border:none;
     border-radius:8px;
-    color:white;
-    cursor:pointer;
-}
-button:hover {
-    background:#2563eb;
 }
 </style>
 
 <div class="container">
 
-<h2>BETON ANALİZ SİSTEMİ</h2>
+<h2>BETON ANALİZ</h2>
 
 <form method="post" enctype="multipart/form-data">
 <input type="file" name="file"><br><br>
@@ -201,34 +220,25 @@ button:hover {
 {% else %}
 
 <div class="card">
-<b>GENEL SONUÇ</b><br><br>
-Tip: {{r.shape}}<br>
 Fck: {{r.fck}}<br>
 Numune: {{r.numune}}<br>
 Ortalama: {{r.avg}}<br>
-Minimum: {{r.min}}<br>
-Limit: {{r.limit}}<br>
 Durum: <span class="{{'ok' if r.status=='UYGUN' else 'bad'}}">{{r.status}}</span>
 </div>
 
 {% for m in r.mixers %}
 <div class="card">
 <b>Mikser {{m.m}}</b><br>
-Değerler: {{m.vals}}<br>
+{{m.vals}}<br>
 Ortalama: {{m.avg}}<br>
 Fark: {{m.diff}} (Limit: {{m.limit}})<br>
-Durum: <span class="{{'ok' if m.status=='OK' else 'bad'}}">{{m.status}}</span>
-<br><br>
+Durum: {{m.status}}<br><br>
 
 {% for d in m.desc %}
 {{d}}<br>
 {% endfor %}
 </div>
 {% endfor %}
-
-<div class="card">
-<b>Problemli Mikserler:</b> {{r.bad}}
-</div>
 
 {% endif %}
 {% endif %}
