@@ -5,7 +5,6 @@ import re
 
 app = Flask(__name__)
 
-# ---------------- PDF OKUMA ----------------
 def parse_pdf(file):
 
     mixers = {}
@@ -16,56 +15,79 @@ def parse_pdf(file):
 
             t = page.extract_text()
             if t:
-                text += t
+                text += "\n" + t
 
             table = page.extract_table()
-            if not table:
-                continue
 
-            header = table[0]
+            # ---------- 1. YÖNTEM: TABLE ----------
+            if table:
+                header = table[0]
 
-            mixer_col = None
-            val_col = None
+                mixer_col = None
+                val_col = None
 
-            # 🔥 doğru sütunları bul
-            for i, h in enumerate(header):
-                h_str = str(h).lower()
+                for i, h in enumerate(header):
+                    h_str = str(h).lower()
 
-                if "mikser" in h_str:
-                    mixer_col = i
+                    if "mikser" in h_str:
+                        mixer_col = i
 
-                if "28" in h_str and "numune" in h_str:
-                    val_col = i
+                    if "28" in h_str and "numune" in h_str:
+                        val_col = i
 
-            if mixer_col is None or val_col is None:
-                continue
+                if mixer_col is not None and val_col is not None:
 
-            for row in table[1:]:
+                    for row in table[1:]:
 
-                try:
-                    mixer = str(row[mixer_col]).strip()
+                        try:
+                            mixer = str(row[mixer_col]).strip()
 
-                    if not mixer.isdigit():
+                            if not mixer.isdigit():
+                                continue
+
+                            raw = str(row[val_col]).replace(",", ".").replace("*", "").strip()
+
+                            if raw == "" or raw.lower() == "none":
+                                continue
+
+                            if len(raw) > 5:
+                                continue
+
+                            val = float(raw)
+
+                            if 30 < val < 70:
+                                mixers.setdefault(mixer, []).append(val)
+
+                        except:
+                            continue
+
+    # ---------- 2. YÖNTEM: TEXT FALLBACK ----------
+    if not mixers:
+
+        lines = text.split("\n")
+        current_mixer = None
+
+        for line in lines:
+
+            m = re.search(r"\b(\d{1,2})\b", line)
+            vals = re.findall(r"\d{2,3}[.,]\d", line)
+
+            if m:
+                current_mixer = m.group(1)
+
+            if current_mixer and vals:
+                for v in vals:
+                    try:
+                        val = float(v.replace(",", "."))
+                        if 30 < val < 70:
+                            mixers.setdefault(current_mixer, []).append(val)
+                    except:
                         continue
 
-                    raw = str(row[val_col]).replace(",", ".").replace("*", "").strip()
+        # her mikserden son 3 değeri al
+        mixers = {k: v[-3:] for k, v in mixers.items() if len(v) >= 3}
 
-                    if raw == "" or raw.lower() == "none":
-                        continue
-
-                    # ❗ ortalama satırı filtrele
-                    if len(raw) > 5:
-                        continue
-
-                    val = float(raw)
-
-                    if 30 < val < 70:
-                        mixers.setdefault(mixer, []).append(val)
-
-                except:
-                    continue
-
-    # -------- FCK --------
+    # ---------- FCK ----------
     match = re.search(r"C(\d{2})/(\d{2})", text)
 
     if match:
@@ -84,7 +106,6 @@ def parse_pdf(file):
     return fck, mixers, values, shape
 
 
-# ---------------- ANALİZ ----------------
 def analyze(fck, mixers, values, shape):
 
     if not values:
@@ -92,20 +113,20 @@ def analyze(fck, mixers, values, shape):
 
     avg = np.mean(values)
     min_val = min(values)
+
     mixer_count = len(mixers)
 
-    # TS kuralı
     if mixer_count == 1:
         limit = fck
-    elif 2 <= mixer_count <= 4:
+    elif mixer_count <= 4:
         limit = fck + 1
     else:
         limit = fck + 2
 
-    uygun = (avg >= limit and min_val >= (fck - 4))
+    status = "UYGUN" if (avg >= limit and min_val >= fck-4) else "UYGUN DEĞİL"
 
     mixer_results = []
-    bad_mixers = []
+    bad = []
 
     for m, vals in mixers.items():
 
@@ -113,23 +134,17 @@ def analyze(fck, mixers, values, shape):
         diff = max(vals) - min(vals)
         limit_diff = 0.15 * m_avg
 
-        dist_ok = diff <= limit_diff
-        strength_ok = m_avg >= (fck - 4)
+        ok = diff <= limit_diff and m_avg >= fck-4
 
-        status = "OK" if (dist_ok and strength_ok) else "PROBLEM"
-
-        if status == "PROBLEM":
-            bad_mixers.append(m)
+        if not ok:
+            bad.append(m)
 
         mixer_results.append({
             "m": m,
-            "vals": [round(v,1) for v in vals],
-            "count": len(vals),
+            "vals": vals,
             "avg": round(m_avg,2),
             "diff": round(diff,2),
-            "limit": round(limit_diff,2),
-            "status": status,
-            "desc": f"{'Dağılım uygun' if dist_ok else 'Dağılım fazla'} / {'Dayanım yeterli' if strength_ok else 'Dayanım yetersiz'}"
+            "status": "OK" if ok else "PROBLEM"
         })
 
     return {
@@ -139,46 +154,21 @@ def analyze(fck, mixers, values, shape):
         "avg": round(avg,2),
         "min": round(min_val,2),
         "limit": limit,
-        "status": "UYGUN" if uygun else "UYGUN DEĞİL",
+        "status": status,
         "mixers": mixer_results,
-        "bad": bad_mixers
+        "bad": bad
     }
 
 
-# ---------------- UI ----------------
 HTML = """
 <style>
-body {
-    font-family: 'Segoe UI';
-    background: linear-gradient(135deg,#0f172a,#1e293b);
-    color:white;
-    margin:0;
-}
-.container {
-    max-width:900px;
-    margin:auto;
-    padding:40px;
-}
-.card {
-    background:#1e293b;
-    padding:20px;
-    border-radius:12px;
-    margin-top:20px;
-}
-.ok {color:#22c55e;}
-.bad {color:#ef4444;}
-button {
-    background:#3b82f6;
-    border:none;
-    padding:12px 25px;
-    border-radius:8px;
-    color:white;
-}
+body {background:#0f172a;color:white;font-family:Arial;padding:30px;}
+.card {background:#1e293b;padding:15px;margin-top:15px;border-radius:10px;}
+button {background:#22c55e;padding:10px;border:none;border-radius:5px;}
+.ok{color:#22c55e;} .bad{color:#ef4444;}
 </style>
 
-<div class="container">
-
-<h2>BETON ANALİZ SİSTEMİ</h2>
+<h2>Beton Analiz</h2>
 
 <form method="post" enctype="multipart/form-data">
 <input type="file" name="file"><br><br>
@@ -191,35 +181,22 @@ button {
 {% else %}
 
 <div class="card">
-Tip: {{r.shape}}<br>
 Fck: {{r.fck}}<br>
 Numune: {{r.numune}}<br>
 Ortalama: {{r.avg}}<br>
-Minimum: {{r.min}}<br>
-Limit: {{r.limit}}<br>
 Durum: <span class="{{'ok' if r.status=='UYGUN' else 'bad'}}">{{r.status}}</span>
 </div>
 
 {% for m in r.mixers %}
 <div class="card">
-<b>Mikser {{m.m}}</b><br>
-Numune: {{m.count}}<br>
+Mikser {{m.m}}<br>
 {{m.vals}}<br>
-Ortalama: {{m.avg}}<br>
-Fark: {{m.diff}} (Limit: {{m.limit}})<br>
-Durum: <span class="{{'ok' if m.status=='OK' else 'bad'}}">{{m.status}}</span><br>
-{{m.desc}}
+Durum: {{m.status}}
 </div>
 {% endfor %}
 
-<div class="card">
-Problemli Mikserler: {{r.bad}}
-</div>
-
 {% endif %}
 {% endif %}
-
-</div>
 """
 
 @app.route("/", methods=["GET","POST"])
@@ -232,5 +209,5 @@ def home():
 
     return render_template_string(HTML,r=result)
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+if __name__=="__main__":
+    app.run(host="0.0.0.0",port=10000)
