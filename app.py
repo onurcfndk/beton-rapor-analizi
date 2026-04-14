@@ -5,84 +5,96 @@ import re
 app = Flask(__name__)
 
 # -------------------------------
-# PDF VERİ OKUMA (DÜZELTİLDİ)
+# SAYI TEMİZLE
 # -------------------------------
-def extract_data(pdf_file):
+def temizle_sayi(text):
+    if not text:
+        return None
+    text = str(text).replace("*", "").replace(",", ".").strip()
+    try:
+        return float(text)
+    except:
+        return None
+
+# -------------------------------
+# PDF PARSE (DÜZELTİLMİŞ)
+# -------------------------------
+def parse_pdf(file):
     mixers = {}
     all_values = []
-    fck = 0
-    numune_tipi = "bilinmiyor"
+    beton_sinifi = None
+    numune_tipi = None
 
-    # Tüm texti çek
-    with pdfplumber.open(pdf_file) as pdf:
-        text = ""
+    with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            text += page.extract_text() + "\n"
 
-    # Numune tipi
-    if "Silindir" in text:
-        numune_tipi = "silindir"
-    elif "Küp" in text:
-        numune_tipi = "küp"
+            text = page.extract_text()
+            if not text:
+                continue
 
-    # Beton sınıfı
-    match = re.search(r"C(\d{2})/(\d{2})", text)
-    if match:
-        if numune_tipi == "silindir":
-            fck = int(match.group(1))
-        else:
-            fck = int(match.group(2))
+            # Beton sınıfı
+            if not beton_sinifi:
+                match = re.search(r'C(\d+)/(\d+)', text)
+                if match:
+                    beton_sinifi = (int(match.group(1)), int(match.group(2)))
 
-    # Tablo okuma
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
+            # Numune tipi
+            if not numune_tipi:
+                if "Silindir" in text:
+                    numune_tipi = "silindir"
+                elif "Küp" in text:
+                    numune_tipi = "kup"
+
             tables = page.extract_tables()
 
             for table in tables:
                 for row in table:
-                    if not row:
+                    if not row or len(row) < 10:
                         continue
 
-                    try:
-                        mikser = row[1]
-                        val_raw = row[13]  # 28 günlük numune
+                    mikser = str(row[1]).strip()
 
-                        if mikser and val_raw:
-                            mikser = str(mikser).strip()
-
-                            # yıldız ve virgül temizleme
-                            val_raw = str(val_raw).replace("*", "").replace(",", ".")
-
-                            val = float(val_raw)
-
-                            # filtre (saçma değerleri alma)
-                            if val < 10 or val > 100:
-                                continue
-
-                            if mikser not in mixers:
-                                mixers[mikser] = []
-
-                            mixers[mikser].append(val)
-                            all_values.append(val)
-
-                    except:
+                    # sadece numeric mikser al
+                    if not mikser.isdigit():
                         continue
 
-    return fck, numune_tipi, mixers, all_values
+                    # ✅ SADECE 28 GÜNLÜK NUMUNE KOLONU
+                    deger = temizle_sayi(row[-2])
+
+                    if not deger:
+                        continue
+
+                    # saçma veri filtre
+                    if deger < 10 or deger > 100:
+                        continue
+
+                    mixers.setdefault(mikser, []).append(deger)
+                    all_values.append(deger)
+
+    if not all_values:
+        raise Exception("PDF veri okunamadı")
+
+    return mixers, all_values, beton_sinifi, numune_tipi
 
 
 # -------------------------------
 # ANALİZ
 # -------------------------------
-def analyze(fck, mixers, all_values):
-    if not all_values:
-        return "PDF veri okunamadı"
+def analyze(mixers, values, beton_sinifi, numune_tipi):
 
-    numune = len(all_values)
-    ortalama = round(sum(all_values) / numune, 2)
-    minimum = round(min(all_values), 2)
+    # FCK
+    if beton_sinifi:
+        if numune_tipi == "silindir":
+            fck = beton_sinifi[0]
+        else:
+            fck = beton_sinifi[1]
+    else:
+        fck = 30
 
-    # TS KONTROL
+    numune = len(values)
+    ortalama = round(sum(values) / numune, 2)
+    minimum = round(min(values), 2)
+
     mikser_sayisi = len(mixers)
 
     if mikser_sayisi == 1:
@@ -94,154 +106,152 @@ def analyze(fck, mixers, all_values):
 
     durum = "UYGUN" if (ortalama >= limit and minimum >= (fck - 4)) else "UYGUN DEĞİL"
 
-    # -------------------------------
-    # MİKSER ANALİZİ
-    # -------------------------------
-    mikser_sonuc = ""
-    problemli = []
+    mikser_sonuclari = []
 
-    for m, vals in mixers.items():
+    for m, vals in sorted(mixers.items(), key=lambda x: int(x[0])):
+
         ort = round(sum(vals) / len(vals), 2)
         fark = round(max(vals) - min(vals), 2)
         limit_fark = round(ort * 0.15, 2)
 
-        dagilim = "UYGUN" if fark <= limit_fark else "PROBLEM"
-        dayanım = "YETERLİ" if ort >= (fck - 4) else "YETERSİZ"
+        dagilim_ok = fark <= limit_fark
+        dayanim_ok = ort >= (fck - 4)
 
-        genel = "OK" if (dagilim == "UYGUN" and dayanım == "YETERLİ") else "PROBLEM"
+        mikser_sonuclari.append({
+            "no": m,
+            "vals": vals,
+            "ort": ort,
+            "fark": fark,
+            "limit": limit_fark,
+            "dagilim": dagilim_ok,
+            "dayanim": dayanim_ok,
+            "durum": dagilim_ok and dayanim_ok
+        })
 
-        if genel == "PROBLEM":
-            problemli.append(m)
-
-        mikser_sonuc += f"""
-        <div class='card {"bad" if genel=="PROBLEM" else "good"}'>
-        <h3>Mikser {m}</h3>
-        <b>Değerler:</b> {vals}<br>
-        <b>Ortalama:</b> {ort}<br>
-        <b>Fark:</b> {fark} (Limit: {limit_fark})<br><br>
-
-        <b>Dağılım:</b> {dagilim}<br>
-        <b>Dayanım:</b> {dayanım} (Limit: {fck-4})<br><br>
-
-        <b>Genel:</b> {genel}
-        </div>
-        """
-
-    return f"""
-    <div class='genel {"bad" if durum=="UYGUN DEĞİL" else "good"}'>
-    <h2>GENEL SONUÇ</h2>
-
-    <b>Numune Tipi:</b> {numune_tipi}<br>
-    <b>Fck:</b> {fck}<br>
-    <b>Numune:</b> {numune}<br>
-    <b>Ortalama:</b> {ortalama}<br>
-    <b>Minimum:</b> {minimum}<br>
-    <b>Limit:</b> {limit}<br><br>
-
-    <b>Durum:</b> {durum}<br><br>
-
-    <b>Kriter:</b><br>
-    Ortalama ≥ Limit<br>
-    Minimum ≥ (fck - 4)
-    </div>
-
-    <h2>MİKSER ANALİZİ</h2>
-    {mikser_sonuc}
-
-    <h3>Problemli Mikserler: {problemli}</h3>
-    """
+    return {
+        "tip": numune_tipi,
+        "fck": fck,
+        "numune": numune,
+        "ortalama": ortalama,
+        "minimum": minimum,
+        "limit": limit,
+        "durum": durum,
+        "mikserler": mikser_sonuclari
+    }
 
 
 # -------------------------------
-# ARAYÜZ (PROFESYONEL TASARIM)
+# HTML (PROFESYONEL)
 # -------------------------------
 HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>Beton Analiz Sistemi</title>
+<title>Beton Analiz</title>
 <style>
 body {
-    font-family: Arial;
-    background: linear-gradient(135deg,#1e3c72,#2a5298);
-    color: white;
-    text-align: center;
+ background: linear-gradient(135deg, #0f172a, #1e293b);
+ color: white;
+ font-family: Arial;
+ padding: 30px;
 }
 
-.container {
-    background: white;
-    color: black;
-    padding: 30px;
-    margin: 40px auto;
-    width: 80%;
-    border-radius: 12px;
-}
-
-button {
-    background: #2a5298;
-    color: white;
-    padding: 12px 25px;
-    border: none;
-    border-radius: 8px;
-    cursor: pointer;
-}
-
-input {
-    margin: 10px;
-}
+.container { max-width: 900px; margin: auto; }
 
 .card {
-    padding: 15px;
-    margin: 10px;
-    border-radius: 8px;
+ background: #1e293b;
+ padding: 20px;
+ border-radius: 12px;
+ margin-top: 20px;
+ box-shadow: 0 0 15px rgba(0,0,0,0.4);
 }
 
-.good {
-    background: #d4edda;
+.ok { color: #22c55e; }
+.bad { color: #ef4444; }
+
+button {
+ background: #3b82f6;
+ padding: 12px 20px;
+ border: none;
+ border-radius: 8px;
+ color: white;
+ cursor: pointer;
 }
 
-.bad {
-    background: #f8d7da;
-}
-
-.genel {
-    padding: 20px;
-    margin-bottom: 20px;
-    border-radius: 10px;
-}
+input { margin-bottom: 15px; }
 </style>
 </head>
-
 <body>
+
 <div class="container">
 <h1>BETON ANALİZ SİSTEMİ</h1>
 
-<form method="POST" enctype="multipart/form-data">
-<input type="file" name="file" required>
-<br>
+<form method="post" enctype="multipart/form-data">
+<input type="file" name="file">
 <button type="submit">Analiz Et</button>
 </form>
 
-<br>
-{{result|safe}}
+{% if result %}
+<div class="card">
+<h2>GENEL</h2>
+<p>Numune Tipi: {{result.tip}}</p>
+<p>Fck: {{result.fck}}</p>
+<p>Numune: {{result.numune}}</p>
+<p>Ortalama: {{result.ortalama}}</p>
+<p>Minimum: {{result.minimum}}</p>
+<p>Limit: {{result.limit}}</p>
+<p class="{{'ok' if result.durum=='UYGUN' else 'bad'}}">{{result.durum}}</p>
+
+<p><b>Kriter:</b></p>
+<p>Ortalama ≥ Limit</p>
+<p>Minimum ≥ (fck - 4)</p>
+</div>
+
+<div class="card">
+<h2>MİKSER ANALİZİ</h2>
+
+{% for m in result.mikserler %}
+<p><b>Mikser {{m.no}}</b></p>
+<p>Değerler: {{m.vals}}</p>
+<p>Ortalama: {{m.ort}}</p>
+<p>Fark: {{m.fark}} (Limit: {{m.limit}})</p>
+
+<p class="{{'ok' if m.dagilim else 'bad'}}">
+Dağılım {{'UYGUN' if m.dagilim else 'PROBLEM'}}
+</p>
+
+<p class="{{'ok' if m.dayanim else 'bad'}}">
+Dayanım {{'YETERLİ' if m.dayanim else 'DÜŞÜK'}} (Limit: {{result.fck - 4}})
+</p>
+
+<p class="{{'ok' if m.durum else 'bad'}}">
+Genel: {{'OK' if m.durum else 'PROBLEM'}}
+</p>
+<hr>
+{% endfor %}
+</div>
+{% endif %}
 </div>
 </body>
 </html>
 """
-
 
 # -------------------------------
 # ROUTE
 # -------------------------------
 @app.route("/", methods=["GET", "POST"])
 def home():
-    result = ""
+    result = None
 
     if request.method == "POST":
         file = request.files["file"]
 
-        fck, numune_tipi, mixers, values = extract_data(file)
-        result = analyze(fck, mixers, values)
+        if file:
+            try:
+                mixers, values, sinif, tip = parse_pdf(file)
+                result = analyze(mixers, values, sinif, tip)
+            except Exception as e:
+                return f"HATA: {str(e)}"
 
     return render_template_string(HTML, result=result)
 
