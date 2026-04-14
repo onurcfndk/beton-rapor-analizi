@@ -131,20 +131,44 @@ def analyze(fck, mixers, values, shape):
     for m, vals in mixers.items():
 
         m_avg = np.mean(vals)
-        diff = max(vals) - min(vals)
+        max_val = max(vals)
+        min_m = min(vals)
+
+        diff = max_val - min_m
         limit_diff = 0.15 * m_avg
 
-        ok = diff <= limit_diff and m_avg >= fck-4
+        # 🔥 1. Dağılım kontrolü
+        dist_ok = diff <= limit_diff
 
-        if not ok:
+        # 🔥 2. Dayanım kontrolü
+        strength_ok = m_avg >= (fck - 4)
+
+        # 🔥 GENEL DURUM
+        if dist_ok and strength_ok:
+            m_status = "OK"
+        else:
+            m_status = "PROBLEM"
             bad.append(m)
+
+        # 🔥 AÇIKLAMA
+        desc = []
+        desc.append(
+            f"Dağılım {'uygun' if dist_ok else 'fazla'} "
+            f"(Fark: {round(diff,2)} / Limit: {round(limit_diff,2)})"
+        )
+        desc.append(
+            f"Dayanım {'yeterli' if strength_ok else 'yetersiz'} "
+            f"(Ortalama: {round(m_avg,2)} / Limit: {fck-4})"
+        )
 
         mixer_results.append({
             "m": m,
-            "vals": vals,
+            "vals": [round(v,1) for v in vals],
             "avg": round(m_avg,2),
             "diff": round(diff,2),
-            "status": "OK" if ok else "PROBLEM"
+            "limit": round(limit_diff,2),
+            "status": m_status,
+            "desc": desc
         })
 
     return {
